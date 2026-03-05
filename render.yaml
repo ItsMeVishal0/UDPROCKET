@@ -1,19 +1,14 @@
 services:
   - type: web
     name: satellite-stress-bot
-    runtime: node
-    region: oregon
+    runtime: python
     plan: free
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /
-    envVars:
-      - key: NODE_VERSION
-        value: 18.17.0
-      - key: NODE_ENV
-        value: production
-    autoDeploy: true
-    disk:
-      name: session-data
-      mountPath: /data
-      sizeGB: 1
+    buildCommand: |
+      apt-get update
+      apt-get install -y wget gnupg unzip xvfb
+      wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+      echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
+      apt-get update
+      apt-get install -y google-chrome-stable
+      pip install -r requirements.txt
+    startCommand: python main.py
