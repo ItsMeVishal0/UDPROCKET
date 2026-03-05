@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: satellite-stress-bot
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 18.17.0
+      - key: NODE_ENV
+        value: production
+    autoDeploy: true
+    disk:
+      name: session-data
+      mountPath: /data
+      sizeGB: 1
