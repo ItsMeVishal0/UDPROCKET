@@ -1,12 +1,13 @@
 services:
   - type: web
-    name: kimstress-iframe-app
+    name: kimstress-login-proxy
     runtime: python
-    region: singapore  # Singapore region for better speed
+    region: singapore
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
-    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.16
+        value: 3.11.0
+      - key: PROXY_ENABLED
+        value: true
