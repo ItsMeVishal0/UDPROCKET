@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: kimstress-login-proxy
+    name: kimstress-proxy
     runtime: python
     region: singapore
     plan: free
