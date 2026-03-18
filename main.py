@@ -8,13 +8,15 @@ import hashlib
 import random
 import string
 import requests
-from flask import Flask, render_template_string, request, make_response, session as flask_session
+import threading
+from flask import Flask, render_template_string, request, make_response, session as flask_session, g
 from flask_cors import CORS
 from urllib.parse import urlparse, urljoin, quote, unquote, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from collections import defaultdict
 from werkzeug.utils import secure_filename
+from time import time
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -36,6 +38,25 @@ USER_AGENTS = [
 
 # Session storage
 session_storage = defaultdict(dict)
+app_start_time = datetime.now()
+
+# Cleanup old sessions periodically
+def cleanup_sessions():
+    """Remove expired sessions"""
+    while True:
+        try:
+            now = datetime.now()
+            expired = [sid for sid, data in session_storage.items() 
+                      if (now - data.get('last_used', now)).seconds > 3600]
+            for sid in expired:
+                del session_storage[sid]
+            threading.Event().wait(300)  # Run every 5 minutes
+        except:
+            pass
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
+cleanup_thread.start()
 
 # HTML Template with advanced features
 HTML_TEMPLATE = '''
@@ -91,7 +112,6 @@ HTML_TEMPLATE = '''
             background: var(--bg-primary);
             border-bottom: 1px solid var(--border);
             padding: 8px 12px;
-            -webkit-app-region: drag;
         }
 
         /* Window Controls */
@@ -513,7 +533,7 @@ HTML_TEMPLATE = '''
                     </div>
                 </div>
                 
-                <button class="nav-button" onclick="showMenu()">⋮</button>
+                <button class="nav-button" onclick="showMenu(event)">⋮</button>
             </div>
         </div>
 
@@ -1037,21 +1057,13 @@ def health():
         'timestamp': datetime.now().isoformat(),
         'active_sessions': len(session_storage),
         'target': TARGET_DOMAIN,
-        'uptime': str(datetime.now() - app.start_time) if hasattr(app, 'start_time') else 'unknown'
+        'uptime': str(datetime.now() - app_start_time)
     }
 
-@app.before_first_request
-def startup():
-    app.start_time = datetime.now()
-
-# Cleanup old sessions periodically
-@app.before_request
-def cleanup_sessions():
-    now = datetime.now()
-    expired = [sid for sid, data in session_storage.items() 
-               if (now - data.get('last_used', now)).seconds > 3600]
-    for sid in expired:
-        del session_storage[sid]
+@app.teardown_appcontext
+def close_connection(exception):
+    """Clean up after request"""
+    pass
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
