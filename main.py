@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import json
 import gzip
 import brotli
@@ -15,8 +16,8 @@ from urllib.parse import urlparse, urljoin, quote, unquote, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from collections import defaultdict
-from werkzeug.utils import secure_filename
-from time import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -30,836 +31,528 @@ BASE_URL = f"https://{TARGET_DOMAIN}"
 # User agents pool
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:109.0) Gecko/20100101 Firefox/121.0'
 ]
+
+# Session with retry strategy
+def create_session():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        read=3,
+        connect=3,
+        backoff_factor=0.3,
+        status_forcelist=(500, 502, 504)
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 # Session storage
 session_storage = defaultdict(dict)
 app_start_time = datetime.now()
 
-# Cleanup old sessions periodically
-def cleanup_sessions():
-    """Remove expired sessions"""
-    while True:
-        try:
-            now = datetime.now()
-            expired = [sid for sid, data in session_storage.items() 
-                      if (now - data.get('last_used', now)).seconds > 3600]
-            for sid in expired:
-                del session_storage[sid]
-            threading.Event().wait(300)  # Run every 5 minutes
-        except:
-            pass
+# Cloudflare cookies storage
+cf_cookies = {}
 
-# Start cleanup thread
-cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
-cleanup_thread.start()
-
-# HTML Template with advanced features
+# HTML Template with Cloudflare handling
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kimstress • Secure Gateway</title>
     <style>
-        /* Modern Reset */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
         }
-
-        /* Variables */
-        :root {
-            --bg-primary: #1a1a1a;
-            --bg-secondary: #2d2d2d;
-            --text-primary: #ffffff;
-            --text-secondary: #b0b0b0;
-            --accent: #4CAF50;
-            --accent-hover: #45a049;
-            --error: #f44336;
-            --success: #4CAF50;
-            --warning: #ff9800;
-            --border: #404040;
-            --shadow: rgba(0, 0, 0, 0.3);
-        }
-
+        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: var(--bg-primary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             height: 100vh;
             overflow: hidden;
-            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-
-        /* Main Container */
-        .browser {
+        
+        .container {
+            width: 95%;
+            max-width: 1200px;
+            height: 95vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
             display: flex;
             flex-direction: column;
-            height: 100vh;
-            background: var(--bg-primary);
         }
-
-        /* Browser Chrome */
-        .browser-chrome {
-            background: var(--bg-primary);
-            border-bottom: 1px solid var(--border);
-            padding: 8px 12px;
+        
+        .browser-header {
+            background: #1a1a1a;
+            padding: 10px 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-
-        /* Window Controls */
-        .window-controls {
+        
+        .window-dots {
             display: flex;
             gap: 8px;
-            margin-bottom: 8px;
         }
-
-        .window-dot {
+        
+        .dot {
             width: 12px;
             height: 12px;
             border-radius: 50%;
         }
-
-        .window-dot.red { background: #ff5f56; }
-        .window-dot.yellow { background: #ffbd2e; }
-        .window-dot.green { background: #27c93f; }
-
-        /* Navigation Bar */
-        .nav-bar {
+        
+        .red { background: #ff5f56; }
+        .yellow { background: #ffbd2e; }
+        .green { background: #27c93f; }
+        
+        .address-bar {
+            flex: 1;
+            background: #333;
+            padding: 8px 15px;
+            border-radius: 20px;
             display: flex;
             align-items: center;
             gap: 10px;
-            background: var(--bg-secondary);
-            padding: 6px 12px;
-            border-radius: 8px;
-            margin-top: 4px;
+            color: white;
         }
-
-        .nav-button {
-            background: transparent;
-            border: none;
-            color: var(--text-secondary);
-            font-size: 18px;
-            cursor: pointer;
-            padding: 4px 8px;
-            border-radius: 4px;
-            transition: all 0.2s;
-        }
-
-        .nav-button:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: var(--text-primary);
-        }
-
-        .nav-button:disabled {
-            opacity: 0.3;
-            cursor: not-allowed;
-        }
-
-        /* Address Bar */
-        .address-bar {
-            flex: 1;
-            display: flex;
-            align-items: center;
-            background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 6px 12px;
-            gap: 8px;
-        }
-
-        .address-bar.locked .lock-icon {
-            color: var(--success);
-        }
-
+        
         .lock-icon {
-            font-size: 14px;
-            color: var(--text-secondary);
+            color: #4caf50;
         }
-
-        .address-input {
+        
+        .url {
             flex: 1;
-            background: transparent;
-            border: none;
-            color: var(--text-primary);
             font-size: 14px;
-            outline: none;
         }
-
-        .address-input::placeholder {
-            color: var(--text-secondary);
-        }
-
-        /* Security Badge */
-        .security-badge {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            padding: 4px 8px;
-            background: rgba(76, 175, 80, 0.1);
-            border-radius: 4px;
-            color: var(--success);
-            font-size: 12px;
-        }
-
-        /* Main Content Area */
-        .content-area {
+        
+        .content {
             flex: 1;
             position: relative;
             background: white;
-            overflow: hidden;
         }
-
+        
         #main-frame {
             width: 100%;
             height: 100%;
             border: none;
             background: white;
-            display: block;
         }
-
-        /* Loading Overlay */
-        .loading-overlay {
+        
+        .loading {
             position: absolute;
             top: 0;
             left: 0;
-            right: 0;
-            bottom: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            width: 100%;
+            height: 100%;
+            background: rgba(255,255,255,0.95);
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             z-index: 1000;
-            transition: opacity 0.3s ease;
-            opacity: 1;
-            pointer-events: all;
+            transition: opacity 0.3s;
         }
-
-        .loading-overlay.hidden {
+        
+        .loading.hidden {
             opacity: 0;
             pointer-events: none;
         }
-
-        .loader {
-            text-align: center;
-            color: white;
-        }
-
-        .loader-spinner {
-            width: 60px;
-            height: 60px;
-            border: 4px solid rgba(255, 255, 255, 0.3);
-            border-top-color: white;
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin: 0 auto 20px;
+            margin-bottom: 20px;
         }
-
+        
         @keyframes spin {
-            to { transform: rotate(360deg); }
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
-
-        .loader-text {
-            font-size: 18px;
-            font-weight: 500;
-            margin-bottom: 8px;
+        
+        .loading-text {
+            color: #333;
+            font-size: 16px;
+            margin-bottom: 10px;
         }
-
-        .loader-subtext {
+        
+        .loading-subtext {
+            color: #666;
             font-size: 14px;
-            opacity: 0.8;
         }
-
-        /* Progress Bar */
-        .progress-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: rgba(255, 255, 255, 0.2);
-            z-index: 1001;
-        }
-
-        .progress-fill {
-            height: 100%;
-            background: var(--accent);
-            width: 0%;
-            transition: width 0.3s ease;
-        }
-
-        /* Error Modal */
-        .error-modal {
+        
+        .error {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
             background: white;
-            border-radius: 12px;
             padding: 30px;
-            max-width: 400px;
-            width: 90%;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             text-align: center;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            z-index: 2000;
+            min-width: 300px;
             display: none;
+            z-index: 1001;
         }
-
-        .error-modal.show {
+        
+        .error.show {
             display: block;
         }
-
+        
         .error-icon {
             font-size: 48px;
             margin-bottom: 15px;
         }
-
+        
         .error-title {
             font-size: 20px;
             font-weight: 600;
-            color: var(--error);
+            color: #e74c3c;
             margin-bottom: 10px;
         }
-
+        
         .error-message {
             color: #666;
-            font-size: 14px;
             margin-bottom: 20px;
-            line-height: 1.5;
         }
-
-        .error-details {
-            background: #f5f5f5;
-            padding: 10px;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 12px;
-            color: #333;
-            margin-bottom: 20px;
-            word-break: break-all;
-        }
-
-        .error-actions {
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-        }
-
+        
         .error-btn {
-            padding: 10px 25px;
-            border: none;
-            border-radius: 6px;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .error-btn.primary {
-            background: var(--accent);
+            background: #3498db;
             color: white;
+            border: none;
+            padding: 10px 30px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
         }
-
-        .error-btn.primary:hover {
-            background: var(--accent-hover);
+        
+        .error-btn:hover {
+            background: #2980b9;
         }
-
-        .error-btn.secondary {
-            background: #e0e0e0;
-            color: #333;
-        }
-
-        .error-btn.secondary:hover {
-            background: #d0d0d0;
-        }
-
-        /* Status Bar */
-        .status-bar {
-            background: var(--bg-secondary);
-            padding: 4px 12px;
-            font-size: 12px;
-            color: var(--text-secondary);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-top: 1px solid var(--border);
-        }
-
-        .status-left {
-            display: flex;
-            gap: 15px;
-        }
-
-        .status-item {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-        }
-
-        .status-dot.secure { background: var(--success); }
-        .status-dot.insecure { background: var(--error); }
-        .status-dot.loading { background: var(--warning); }
-
-        /* Context Menu */
-        .context-menu {
+        
+        .cf-challenge {
             position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             background: white;
-            border-radius: 8px;
-            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
-            padding: 5px 0;
-            min-width: 150px;
-            z-index: 3000;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 500px;
+            width: 90%;
             display: none;
+            z-index: 2000;
         }
-
-        .context-menu.show {
+        
+        .cf-challenge.show {
             display: block;
         }
-
-        .context-menu-item {
-            padding: 8px 15px;
-            font-size: 13px;
+        
+        .cf-logo {
+            font-size: 60px;
+            margin-bottom: 20px;
+        }
+        
+        .cf-title {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 10px;
             color: #333;
+        }
+        
+        .cf-text {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .cf-checkbox {
+            width: 30px;
+            height: 30px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            margin: 0 auto 20px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.3s;
         }
-
-        .context-menu-item:hover {
-            background: #f0f0f0;
+        
+        .cf-checkbox.checked {
+            background: #4caf50;
+            border-color: #4caf50;
+            position: relative;
         }
-
-        .context-menu-divider {
-            height: 1px;
-            background: #e0e0e0;
-            margin: 5px 0;
+        
+        .cf-checkbox.checked::after {
+            content: '✓';
+            color: white;
+            font-size: 20px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
         }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .security-badge span:not(.lock-icon) {
-                display: none;
-            }
-            
-            .address-bar {
-                padding: 4px 8px;
-            }
-            
-            .error-actions {
-                flex-direction: column;
-            }
+        
+        .cf-footer {
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
         }
-
-        /* Animations */
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-
-        .pulse {
-            animation: pulse 2s infinite;
-        }
-
-        /* Toast Notifications */
-        .toast-container {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            z-index: 4000;
-        }
-
-        .toast {
-            background: white;
-            border-radius: 8px;
-            padding: 12px 20px;
-            margin-top: 10px;
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        
+        .status-bar {
+            background: #1a1a1a;
+            padding: 5px 15px;
+            color: #aaa;
+            font-size: 12px;
             display: flex;
-            align-items: center;
-            gap: 10px;
-            animation: slideIn 0.3s ease;
+            justify-content: space-between;
         }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-
-        .toast.success { border-left: 4px solid var(--success); }
-        .toast.error { border-left: 4px solid var(--error); }
-        .toast.warning { border-left: 4px solid var(--warning); }
     </style>
 </head>
 <body>
-    <div class="browser">
-        <!-- Browser Chrome -->
-        <div class="browser-chrome">
-            <div class="window-controls">
-                <div class="window-dot red"></div>
-                <div class="window-dot yellow"></div>
-                <div class="window-dot green"></div>
+    <div class="container">
+        <div class="browser-header">
+            <div class="window-dots">
+                <div class="dot red"></div>
+                <div class="dot yellow"></div>
+                <div class="dot green"></div>
             </div>
-            
-            <div class="nav-bar">
-                <button class="nav-button" onclick="history.back()" id="backBtn" disabled>←</button>
-                <button class="nav-button" onclick="history.forward()" id="forwardBtn" disabled>→</button>
-                <button class="nav-button" onclick="refresh()">↻</button>
-                
-                <div class="address-bar locked" id="addressBar">
-                    <span class="lock-icon">🔒</span>
-                    <input type="text" class="address-input" id="addressInput" value="{{ target_url }}" readonly>
-                    <div class="security-badge">
-                        <span>🔒</span>
-                        <span>Secure</span>
-                    </div>
-                </div>
-                
-                <button class="nav-button" onclick="showMenu(event)">⋮</button>
+            <div class="address-bar">
+                <span class="lock-icon">🔒</span>
+                <span class="url" id="urlDisplay">kimstress.st/login</span>
             </div>
         </div>
-
-        <!-- Main Content -->
-        <div class="content-area">
-            <!-- Progress Bar -->
-            <div class="progress-bar" id="progressBar">
-                <div class="progress-fill" id="progressFill"></div>
+        
+        <div class="content">
+            <!-- Loading -->
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <div class="loading-text">Loading secure content...</div>
+                <div class="loading-subtext" id="loadingStatus">Connecting to server</div>
             </div>
-
-            <!-- Loading Overlay -->
-            <div class="loading-overlay" id="loadingOverlay">
-                <div class="loader">
-                    <div class="loader-spinner"></div>
-                    <div class="loader-text">Establishing secure connection...</div>
-                    <div class="loader-subtext" id="loadingStatus">Connecting to {{ target_domain }}</div>
-                </div>
-            </div>
-
-            <!-- Error Modal -->
-            <div class="error-modal" id="errorModal">
+            
+            <!-- Error -->
+            <div class="error" id="error">
                 <div class="error-icon">⚠️</div>
-                <div class="error-title" id="errorTitle">Connection Error</div>
-                <div class="error-message" id="errorMessage">Unable to load the website</div>
-                <div class="error-details" id="errorDetails"></div>
-                <div class="error-actions">
-                    <button class="error-btn primary" onclick="retry()">Try Again</button>
-                    <button class="error-btn secondary" onclick="closeError()">Dismiss</button>
-                </div>
+                <div class="error-title">Connection Error</div>
+                <div class="error-message" id="errorMessage">Failed to load website</div>
+                <button class="error-btn" onclick="retry()">Try Again</button>
             </div>
-
+            
+            <!-- Cloudflare Challenge -->
+            <div class="cf-challenge" id="cfChallenge">
+                <div class="cf-logo">🛡️</div>
+                <div class="cf-title">Verify you are human</div>
+                <div class="cf-text">Complete the security check to access kimstress.st</div>
+                <div class="cf-checkbox" id="cfCheckbox" onclick="verifyHuman()"></div>
+                <div class="cf-text" style="font-size: 14px;">Click to verify</div>
+                <div class="cf-footer">Protected by Cloudflare</div>
+            </div>
+            
             <!-- Iframe -->
             <iframe 
                 id="main-frame"
                 src="/proxy/{{ encoded_url }}"
-                sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-top-navigation allow-downloads allow-popups-to-escape-sandbox allow-storage-access-by-user-activation"
+                sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-top-navigation allow-downloads"
                 referrerpolicy="no-referrer"
-                importance="high"
-                loading="eager">
+                style="width: 100%; height: 100%;">
             </iframe>
         </div>
-
-        <!-- Status Bar -->
+        
         <div class="status-bar">
-            <div class="status-left">
-                <div class="status-item">
-                    <span class="status-dot secure" id="statusDot"></span>
-                    <span id="statusText">Secure Connection</span>
-                </div>
-                <div class="status-item" id="loadTime">Load time: 0ms</div>
-            </div>
-            <div class="status-right">
-                <span id="timestamp">{{ timestamp }}</span>
-            </div>
+            <span id="statusText">Secure Connection</span>
+            <span id="timestamp">{{ timestamp }}</span>
         </div>
-
-        <!-- Context Menu -->
-        <div class="context-menu" id="contextMenu">
-            <div class="context-menu-item" onclick="copyUrl()">Copy URL</div>
-            <div class="context-menu-item" onclick="openInNewTab()">Open in new tab</div>
-            <div class="context-menu-divider"></div>
-            <div class="context-menu-item" onclick="viewSource()">View page source</div>
-            <div class="context-menu-item" onclick="inspect()">Inspect element</div>
-        </div>
-
-        <!-- Toast Container -->
-        <div class="toast-container" id="toastContainer"></div>
     </div>
 
     <script>
-        // State management
-        let state = {
-            loading: true,
-            error: null,
-            loadTime: 0,
-            history: [],
-            currentIndex: -1,
-            retryCount: 0,
-            maxRetries: 3,
-            startTime: Date.now()
-        };
-
-        // DOM Elements
         const iframe = document.getElementById('main-frame');
-        const loadingOverlay = document.getElementById('loadingOverlay');
-        const errorModal = document.getElementById('errorModal');
-        const progressFill = document.getElementById('progressFill');
-        const addressInput = document.getElementById('addressInput');
-        const backBtn = document.getElementById('backBtn');
-        const forwardBtn = document.getElementById('forwardBtn');
-        const statusDot = document.getElementById('statusDot');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const cfChallenge = document.getElementById('cfChallenge');
+        const cfCheckbox = document.getElementById('cfCheckbox');
         const statusText = document.getElementById('statusText');
-        const loadTimeEl = document.getElementById('loadTime');
         const loadingStatus = document.getElementById('loadingStatus');
-
-        // Initialize
-        window.onload = function() {
-            state.startTime = Date.now();
-            updateLoadingStatus('Connecting...');
+        const urlDisplay = document.getElementById('urlDisplay');
+        
+        let retryCount = 0;
+        const maxRetries = 3;
+        let verified = false;
+        
+        // Anti-detection
+        Object.defineProperties(navigator, {
+            webdriver: { get: () => undefined },
+            plugins: { get: () => [1, 2, 3, 4, 5] },
+            languages: { get: () => ['en-US', 'en'] }
+        });
+        
+        // Cloudflare verification
+        function verifyHuman() {
+            cfCheckbox.classList.add('checked');
+            loadingStatus.textContent = 'Verifying...';
             
-            // Anti-detection
-            Object.defineProperties(navigator, {
-                webdriver: { get: () => undefined },
-                plugins: { get: () => [1, 2, 3, 4, 5] },
-                languages: { get: () => ['en-US', 'en'] }
-            });
-            
-            if (!window.chrome) {
-                window.chrome = { runtime: {} };
-            }
-        };
-
-        // Iframe event handlers
+            setTimeout(() => {
+                cfChallenge.classList.remove('show');
+                loading.classList.remove('hidden');
+                verified = true;
+                refresh();
+            }, 1000);
+        }
+        
+        // Iframe handlers
         iframe.onload = function() {
-            state.loading = false;
-            state.loadTime = Date.now() - state.startTime;
-            state.retryCount = 0;
-            
-            loadingOverlay.classList.add('hidden');
-            errorModal.classList.remove('show');
-            
-            updateStatus('connected');
-            updateLoadTime();
+            loading.classList.add('hidden');
+            error.classList.remove('show');
+            cfChallenge.classList.remove('show');
+            statusText.textContent = 'Connected';
+            retryCount = 0;
             
             try {
                 const iframeUrl = iframe.contentWindow.location.href;
                 if (iframeUrl && iframeUrl !== 'about:blank') {
-                    addressInput.value = iframeUrl;
+                    const url = new URL(iframeUrl);
+                    urlDisplay.textContent = url.hostname + url.pathname;
                 }
-            } catch(e) {
-                // Cross-origin
-            }
+            } catch(e) {}
         };
-
-        iframe.onerror = function(e) {
-            handleError('Failed to load website', e);
+        
+        iframe.onerror = function() {
+            handleError('Connection failed');
         };
-
-        // Progress simulation
-        function updateProgress(percent) {
-            progressFill.style.width = percent + '%';
+        
+        // Check for Cloudflare challenge
+        function checkForCloudflare() {
+            try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (iframeDoc) {
+                    const html = iframeDoc.documentElement.innerHTML;
+                    if (html.includes('cf-challenge') || html.includes('cloudflare')) {
+                        loading.classList.add('hidden');
+                        cfChallenge.classList.add('show');
+                        statusText.textContent = 'Verification Required';
+                        return true;
+                    }
+                }
+            } catch(e) {}
+            return false;
         }
-
-        let progress = 0;
-        const progressInterval = setInterval(() => {
-            if (state.loading && progress < 90) {
-                progress += Math.random() * 10;
-                updateProgress(Math.min(progress, 90));
-            }
-        }, 200);
-
+        
         // Error handling
-        function handleError(message, details = null) {
-            state.loading = false;
-            state.error = message;
-            
-            if (state.retryCount < state.maxRetries) {
-                state.retryCount++;
-                updateLoadingStatus(`Retrying (${state.retryCount}/${state.maxRetries})...`);
-                setTimeout(() => {
-                    refresh();
-                }, 2000 * state.retryCount);
+        function handleError(message) {
+            if (!verified && retryCount < maxRetries) {
+                retryCount++;
+                loadingStatus.textContent = `Retrying (${retryCount}/${maxRetries})...`;
+                setTimeout(refresh, 2000 * retryCount);
+            } else if (!verified) {
+                loading.classList.add('hidden');
+                cfChallenge.classList.add('show');
+                statusText.textContent = 'Verification Required';
             } else {
-                loadingOverlay.classList.add('hidden');
-                errorModal.classList.add('show');
-                document.getElementById('errorTitle').textContent = 'Connection Error';
+                loading.classList.add('hidden');
+                error.classList.add('show');
                 document.getElementById('errorMessage').textContent = message;
-                document.getElementById('errorDetails').textContent = details || 'Maximum retry attempts reached';
             }
-            
-            updateStatus('error');
         }
-
-        // Navigation functions
+        
+        // Refresh function
         function refresh() {
-            state.loading = true;
-            state.startTime = Date.now();
-            progress = 0;
-            updateProgress(0);
-            loadingOverlay.classList.remove('hidden');
-            updateLoadingStatus('Refreshing...');
-            
+            loading.classList.remove('hidden');
+            error.classList.remove('show');
             const currentSrc = iframe.src;
             iframe.src = 'about:blank';
             setTimeout(() => {
                 iframe.src = currentSrc;
             }, 100);
         }
-
-        function updateLoadingStatus(text) {
-            loadingStatus.textContent = text;
-        }
-
-        function updateStatus(status) {
-            if (status === 'connected') {
-                statusDot.className = 'status-dot secure';
-                statusText.textContent = 'Secure Connection';
-            } else if (status === 'error') {
-                statusDot.className = 'status-dot insecure';
-                statusText.textContent = 'Connection Error';
-            } else {
-                statusDot.className = 'status-dot loading';
-                statusText.textContent = 'Loading...';
-            }
-        }
-
-        function updateLoadTime() {
-            loadTimeEl.textContent = `Load time: ${state.loadTime}ms`;
-        }
-
-        // Address bar functions
-        addressInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                let url = this.value;
-                if (!url.startsWith('http')) {
-                    url = 'https://' + url;
-                }
-                window.location.href = '/?url=' + encodeURIComponent(url);
-            }
-        });
-
-        // Context menu
-        function showMenu(event) {
-            const menu = document.getElementById('contextMenu');
-            menu.style.display = 'block';
-            menu.style.left = event.pageX + 'px';
-            menu.style.top = event.pageY + 'px';
-            
-            setTimeout(() => {
-                document.addEventListener('click', function hideMenu() {
-                    menu.style.display = 'none';
-                    document.removeEventListener('click', hideMenu);
-                });
-            }, 100);
-        }
-
-        // Toast notifications
-        function showToast(message, type = 'info') {
-            const container = document.getElementById('toastContainer');
-            const toast = document.createElement('div');
-            toast.className = `toast ${type}`;
-            toast.innerHTML = `
-                <span>${message}</span>
-                <button onclick="this.parentElement.remove()" style="background:none; border:none; cursor:pointer;">✕</button>
-            `;
-            container.appendChild(toast);
-            
-            setTimeout(() => {
-                toast.remove();
-            }, 5000);
-        }
-
-        // Utility functions
-        function copyUrl() {
-            navigator.clipboard.writeText(addressInput.value);
-            showToast('URL copied to clipboard', 'success');
-        }
-
-        function openInNewTab() {
-            window.open(addressInput.value, '_blank');
-        }
-
-        function viewSource() {
-            try {
-                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                const source = iframeDoc.documentElement.outerHTML;
-                const win = window.open();
-                win.document.write('<pre>' + source.replace(/</g, '&lt;') + '</pre>');
-            } catch(e) {
-                showToast('Cannot view source: Cross-origin restrictions', 'error');
-            }
-        }
-
-        function inspect() {
-            showToast('Inspect element is not available in proxy mode', 'warning');
-        }
-
+        
         function retry() {
-            errorModal.classList.remove('show');
+            error.classList.remove('show');
             refresh();
         }
-
-        function closeError() {
-            errorModal.classList.remove('show');
-        }
-
-        // Handle visibility change
-        document.addEventListener('visibilitychange', function() {
-            if (!document.hidden && state.error) {
-                refresh();
-            }
-        });
-
-        // Handle offline/online
-        window.addEventListener('online', function() {
-            showToast('Connection restored', 'success');
-            refresh();
-        });
-
-        window.addEventListener('offline', function() {
-            showToast('No internet connection', 'error');
-        });
-
-        // Periodic check
-        setInterval(() => {
+        
+        // Check periodically for Cloudflare
+        setInterval(checkForCloudflare, 2000);
+        
+        // Timeout handler
+        setTimeout(() => {
             try {
-                if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank' && !state.loading) {
-                    refresh();
+                if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
+                    handleError('Connection timeout');
                 }
-            } catch(e) {}
-        }, 30000);
+            } catch(e) {
+                handleError('Connection timeout');
+            }
+        }, 15000);
     </script>
 </body>
 </html>
 '''
 
+def solve_cloudflare_challenge(session, url, headers):
+    """Handle Cloudflare challenge"""
+    try:
+        # First request to get challenge
+        response = session.get(url, headers=headers, timeout=30)
+        
+        # Check if it's Cloudflare
+        if 'cf-challenge' in response.text or 'cloudflare' in response.text:
+            # Extract challenge data
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for challenge form
+            form = soup.find('form', {'id': 'challenge-form'})
+            if form:
+                # Get action URL
+                action = form.get('action', '')
+                if action.startswith('/'):
+                    action = urljoin(url, action)
+                
+                # Get form data
+                form_data = {}
+                for input_tag in form.find_all('input'):
+                    name = input_tag.get('name')
+                    value = input_tag.get('value', '')
+                    if name:
+                        form_data[name] = value
+                
+                # Add delay to simulate human
+                time.sleep(5)
+                
+                # Submit challenge
+                response = session.post(action, data=form_data, headers=headers, timeout=30)
+        
+        return response
+    except:
+        return None
+
 @app.route('/')
 def index():
-    """Main page with advanced proxy"""
+    """Main page"""
     target_url = request.args.get('url', TARGET_URL)
-    from urllib.parse import quote
     encoded_url = quote(target_url, safe='')
     
     return render_template_string(
         HTML_TEMPLATE,
-        target_url=target_url,
         target_domain=TARGET_DOMAIN,
         encoded_url=encoded_url,
         timestamp=datetime.now().strftime('%H:%M:%S')
@@ -868,10 +561,9 @@ def index():
 @app.route('/proxy/<path:encoded_url>')
 @app.route('/proxy/')
 def proxy(encoded_url=''):
-    """Advanced proxy handler"""
+    """Proxy with Cloudflare bypass"""
     try:
         # Decode URL
-        from urllib.parse import unquote
         if encoded_url:
             target_url = unquote(encoded_url)
         else:
@@ -884,25 +576,14 @@ def proxy(encoded_url=''):
         parsed = urlparse(target_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         
-        # Generate session ID
+        # Get or create session
         session_id = request.cookies.get('session_id') or hashlib.md5(os.urandom(16)).hexdigest()
         
-        # Get or create session
-        if session_id not in session_storage:
-            session_storage[session_id] = {
-                'cookies': {},
-                'headers': {},
-                'last_used': datetime.now()
-            }
-        
-        # Update session
-        session_storage[session_id]['last_used'] = datetime.now()
-        
-        # Prepare headers
+        # Prepare headers (real browser headers)
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
@@ -912,32 +593,35 @@ def proxy(encoded_url=''):
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache',
-            'Referer': random.choice(['https://www.google.com/', 'https://www.bing.com/', 'https://duckduckgo.com/']),
-            'DNT': '1'
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"'
         }
         
-        # Add session cookies
+        # Create session with retry
+        session = create_session()
+        
+        # Add cookies from storage
         cookies = session_storage[session_id].get('cookies', {})
         
-        # Extract cookies from URL
-        if '__cf_chl_rt_tk' in target_url:
-            params = parse_qs(parsed.query)
-            if '__cf_chl_rt_tk' in params:
-                cookies['__cf_chl_rt_tk'] = params['__cf_chl_rt_tk'][0]
+        # Add Cloudflare cookies if exist
+        if '__cfduid' in cf_cookies:
+            cookies['__cfduid'] = cf_cookies['__cfduid']
+        if 'cf_clearance' in cf_cookies:
+            cookies['cf_clearance'] = cf_cookies['cf_clearance']
         
-        # Make request
-        session = requests.Session()
-        response = session.get(
-            target_url,
-            headers=headers,
-            cookies=cookies,
-            timeout=30,
-            allow_redirects=True,
-            verify=False  # For HTTPS issues
-        )
+        # Make request with Cloudflare handling
+        response = solve_cloudflare_challenge(session, target_url, headers)
         
-        # Save cookies
+        if not response:
+            response = session.get(target_url, headers=headers, cookies=cookies, timeout=30, allow_redirects=True)
+        
+        # Save Cloudflare cookies
         for cookie in response.cookies:
+            if cookie.name.startswith('__cf') or cookie.name == 'cf_clearance':
+                cf_cookies[cookie.name] = cookie.value
             session_storage[session_id]['cookies'][cookie.name] = cookie.value
         
         # Get content
@@ -945,7 +629,6 @@ def proxy(encoded_url=''):
         
         # Handle compression
         content_encoding = response.headers.get('Content-Encoding', '')
-        
         if 'gzip' in content_encoding:
             try:
                 content = gzip.decompress(content)
@@ -957,12 +640,59 @@ def proxy(encoded_url=''):
             except:
                 pass
         
-        # Detect content type
-        content_type = response.headers.get('Content-Type', 'text/html; charset=utf-8')
+        # Check for Cloudflare challenge in content
+        content_str = content.decode('utf-8', errors='ignore') if isinstance(content, bytes) else content
+        
+        if 'cf-challenge' in content_str or 'cloudflare' in content_str:
+            # Return HTML with Cloudflare challenge
+            return '''
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Security Check</title>
+                <meta http-equiv="refresh" content="5">
+                <style>
+                    body { 
+                        font-family: Arial; 
+                        display: flex; 
+                        justify-content: center; 
+                        align-items: center; 
+                        height: 100vh; 
+                        margin: 0;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    }
+                    .box {
+                        background: white;
+                        padding: 40px;
+                        border-radius: 10px;
+                        text-align: center;
+                        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                    }
+                    .spinner {
+                        width: 40px;
+                        height: 40px;
+                        border: 4px solid #f3f3f3;
+                        border-top: 4px solid #3498db;
+                        border-radius: 50%;
+                        animation: spin 1s linear infinite;
+                        margin: 20px auto;
+                    }
+                    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                </style>
+            </head>
+            <body>
+                <div class="box">
+                    <h2>🛡️ Security Check</h2>
+                    <p>Please wait while we verify your browser...</p>
+                    <div class="spinner"></div>
+                    <p style="color: #666; font-size: 14px;">This may take a few seconds</p>
+                </div>
+            </body>
+            </html>
+            '''
         
         # Process HTML content
-        if 'text/html' in content_type:
-            # Parse with BeautifulSoup
+        if 'text/html' in response.headers.get('Content-Type', ''):
             soup = BeautifulSoup(content, 'html.parser')
             
             # Fix all URLs
@@ -977,33 +707,12 @@ def proxy(encoded_url=''):
                         elif not original.startswith(('http', 'https', 'data:', 'blob:')):
                             tag[attr] = urljoin(target_url, original)
             
-            # Fix CSS links
-            for link in soup.find_all('link', rel='stylesheet'):
-                if link.get('href'):
-                    href = link['href']
-                    if not href.startswith(('http', 'https', 'data:')):
-                        link['href'] = urljoin(base_url, href)
-            
             # Add base tag
             if not soup.find('base'):
                 base = soup.new_tag('base', href=base_url + '/')
                 if soup.head:
                     soup.head.insert(0, base)
-                else:
-                    head = soup.new_tag('head')
-                    head.append(base)
-                    if soup.html:
-                        soup.html.insert(0, head)
             
-            # Add meta tags
-            meta = soup.new_tag('meta')
-            meta['http-equiv'] = 'Content-Security-Policy'
-            meta['content'] = "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src *; img-src * data: blob:; style-src * 'unsafe-inline'; frame-src *;"
-            
-            if soup.head:
-                soup.head.append(meta)
-            
-            # Convert back to string
             content = str(soup).encode('utf-8')
         
         # Create response
@@ -1011,60 +720,24 @@ def proxy(encoded_url=''):
         
         # Set cookies
         for name, value in session_storage[session_id]['cookies'].items():
-            proxy_response.set_cookie(
-                name,
-                value,
-                domain=None,
-                path='/',
-                secure=False,
-                httponly=False,
-                samesite='Lax'
-            )
+            proxy_response.set_cookie(name, value, domain=None, path='/')
         
         proxy_response.set_cookie('session_id', session_id, max_age=3600, path='/')
         
         # Set headers
-        proxy_response.headers['Content-Type'] = content_type.split(';')[0] + '; charset=utf-8'
+        proxy_response.headers['Content-Type'] = response.headers.get('Content-Type', 'text/html; charset=utf-8').split(';')[0] + '; charset=utf-8'
         proxy_response.headers['Access-Control-Allow-Origin'] = '*'
-        proxy_response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        proxy_response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
-        proxy_response.headers['Access-Control-Allow-Credentials'] = 'true'
         proxy_response.headers['X-Frame-Options'] = 'ALLOWALL'
-        proxy_response.headers['X-Content-Type-Options'] = 'nosniff'
-        proxy_response.headers['Referrer-Policy'] = 'no-referrer'
-        
-        # Remove problematic headers
-        proxy_response.headers.pop('Content-Encoding', None)
-        proxy_response.headers.pop('Content-Length', None)
-        proxy_response.headers.pop('Transfer-Encoding', None)
         
         return proxy_response
         
-    except requests.exceptions.Timeout:
-        return "Connection timeout. The server is not responding.", 504
-    except requests.exceptions.ConnectionError:
-        return "Connection error. Unable to reach the server.", 502
-    except requests.exceptions.SSLError:
-        return "SSL Error. There might be an issue with the website's security certificate.", 525
     except Exception as e:
-        return f"Proxy error: {str(e)}", 500
+        return f"Error: {str(e)}", 500
 
 @app.route('/health')
 def health():
-    """Health check with detailed status"""
-    return {
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'active_sessions': len(session_storage),
-        'target': TARGET_DOMAIN,
-        'uptime': str(datetime.now() - app_start_time)
-    }
-
-@app.teardown_appcontext
-def close_connection(exception):
-    """Clean up after request"""
-    pass
+    return {'status': 'healthy', 'uptime': str(datetime.now() - app_start_time)}
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
