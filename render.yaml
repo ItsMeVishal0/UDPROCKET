@@ -1,11 +1,15 @@
 services:
   - type: web
-    name: kimstress-wrapper
+    name: kimstress-ultimate
     runtime: python
-    plan: free
     region: oregon
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app
+    startCommand: gunicorn -w 4 -b 0.0.0.0:$PORT main:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: FLASK_ENV
+        value: production
+    healthCheckPath: /health
+    autoDeploy: true
