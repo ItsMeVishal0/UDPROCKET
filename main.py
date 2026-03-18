@@ -1,13 +1,12 @@
 import os
 import random
-import string
 import requests
+import gzip
 from flask import Flask, render_template_string, make_response
 from datetime import datetime
 
 app = Flask(__name__)
 
-# HTML Template with proxy approach
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -18,8 +17,8 @@ HTML_TEMPLATE = '''
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f2f5;
             height: 100vh;
             overflow: hidden;
         }
@@ -29,223 +28,170 @@ HTML_TEMPLATE = '''
             display: flex;
             flex-direction: column;
         }
-        .browser-mock {
+        .header {
             background: #1a1a1a;
             padding: 8px 15px;
             display: flex;
             align-items: center;
             gap: 10px;
-            border-bottom: 1px solid #333;
         }
-        .browser-dots { display: flex; gap: 8px; }
-        .dot { width: 12px; height: 12px; border-radius: 50%; }
-        .dot.red { background: #ff5f56; }
-        .dot.yellow { background: #ffbd2e; }
-        .dot.green { background: #27c93f; }
-        .browser-address {
+        .dots {
+            display: flex;
+            gap: 8px;
+        }
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        .red { background: #ff5f56; }
+        .yellow { background: #ffbd2e; }
+        .green { background: #27c93f; }
+        .address-bar {
             flex: 1;
             background: #333;
             color: #fff;
             padding: 6px 15px;
             border-radius: 20px;
             font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
         }
-        .lock-icon { color: #4caf50; font-size: 16px; }
-        .url-text { color: #aaa; margin-left: auto; font-size: 12px; }
         .iframe-container {
             flex: 1;
             background: white;
             position: relative;
-            overflow: hidden;
         }
         #main-frame {
             width: 100%;
             height: 100%;
             border: none;
             background: white;
-            display: block;
         }
-        .loading-screen {
+        .loading {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: white;
             display: flex;
-            flex-direction: column;
             justify-content: center;
             align-items: center;
-            color: white;
             z-index: 10;
-            transition: opacity 0.3s ease;
         }
-        .loading-screen.hidden { opacity: 0; pointer-events: none; }
-        .loading-spinner {
-            width: 60px;
-            height: 60px;
-            border: 5px solid rgba(255,255,255,0.3);
-            border-top-color: white;
+        .loading.hidden {
+            display: none;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin-bottom: 20px;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .loading-text { font-size: 18px; margin-bottom: 10px; }
-        .loading-subtext { font-size: 14px; opacity: 0.8; }
-        .error-message {
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
             background: white;
-            padding: 30px;
-            border-radius: 10px;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             text-align: center;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             display: none;
             z-index: 20;
         }
-        .error-message.show { display: block; }
-        .error-title { color: #ff4757; font-size: 20px; margin-bottom: 10px; }
-        .refresh-btn {
-            background: #667eea;
+        .error.show {
+            display: block;
+        }
+        .error button {
+            background: #3498db;
             color: white;
             border: none;
-            padding: 10px 30px;
-            border-radius: 5px;
-            margin-top: 20px;
+            padding: 8px 20px;
+            border-radius: 4px;
+            margin-top: 10px;
             cursor: pointer;
-            font-weight: 600;
         }
-        .refresh-btn:hover { background: #5a67d8; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="browser-mock">
-            <div class="browser-dots">
+        <div class="header">
+            <div class="dots">
                 <div class="dot red"></div>
                 <div class="dot yellow"></div>
                 <div class="dot green"></div>
             </div>
-            <div class="browser-address">
-                <span class="lock-icon">🔒</span>
-                <span>kimstress.st/login</span>
-                <span class="url-text">secure connection</span>
+            <div class="address-bar">
+                🔒 kimstress.st/login
             </div>
         </div>
         
         <div class="iframe-container">
-            <div class="loading-screen" id="loadingScreen">
-                <div class="loading-spinner"></div>
-                <div class="loading-text">Loading secure content...</div>
-                <div class="loading-subtext">Please wait while we establish connection</div>
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
             </div>
             
-            <div class="error-message" id="errorMessage">
-                <div class="error-title">⚠️ Connection Error</div>
-                <div id="errorText">Failed to load content</div>
-                <button class="refresh-btn" onclick="location.reload()">Try Again</button>
+            <div class="error" id="error">
+                <div style="color: #e74c3c; margin-bottom: 10px;">⚠️ Connection Error</div>
+                <div id="errorText">Failed to load website</div>
+                <button onclick="location.reload()">Retry</button>
             </div>
             
             <iframe 
                 id="main-frame"
                 src="/proxy"
-                sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-top-navigation allow-downloads allow-popups-to-escape-sandbox allow-storage-access-by-user-activation"
+                sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-top-navigation"
                 referrerpolicy="no-referrer"
-                importance="high"
-                loading="eager">
+                style="width: 100%; height: 100%;">
             </iframe>
         </div>
     </div>
 
     <script>
-        (function() {
-            // Anti-detection
-            Object.defineProperties(navigator, {
-                webdriver: { get: () => undefined },
-                plugins: { get: () => [1, 2, 3, 4, 5] },
-                languages: { get: () => ['en-US', 'en', 'hi'] }
-            });
-            
-            if (!window.chrome) {
-                window.chrome = { runtime: {} };
+        const iframe = document.getElementById('main-frame');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        
+        let retryCount = 0;
+        const maxRetries = 3;
+        
+        iframe.onload = function() {
+            loading.classList.add('hidden');
+            error.classList.remove('show');
+            console.log('Iframe loaded successfully');
+        };
+        
+        iframe.onerror = function() {
+            if (retryCount < maxRetries) {
+                retryCount++;
+                console.log('Retrying...', retryCount);
+                setTimeout(() => {
+                    iframe.src = '/proxy?retry=' + retryCount;
+                }, 2000);
+            } else {
+                loading.classList.add('hidden');
+                error.classList.add('show');
+                document.getElementById('errorText').innerText = 'Failed after ' + maxRetries + ' attempts';
             }
-
-            const iframe = document.getElementById('main-frame');
-            const loadingScreen = document.getElementById('loadingScreen');
-            const errorMessage = document.getElementById('errorMessage');
-            
-            let retryCount = 0;
-            const maxRetries = 3;
-
-            function showError(msg) {
-                document.getElementById('errorText').textContent = msg;
-                errorMessage.classList.add('show');
-                loadingScreen.classList.add('hidden');
+        };
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+            try {
+                if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
+                    iframe.onerror();
+                }
+            } catch(e) {
+                // Cross-origin error, ignore
             }
-
-            // Handle iframe load
-            iframe.onload = function() {
-                console.log('Iframe loaded successfully');
-                loadingScreen.classList.add('hidden');
-                errorMessage.classList.remove('show');
-                
-                // Try to modify iframe content
-                try {
-                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                    if (iframeDoc) {
-                        // Add meta tags for better rendering
-                        const meta = iframeDoc.createElement('meta');
-                        meta.name = 'viewport';
-                        meta.content = 'width=device-width, initial-scale=1.0';
-                        iframeDoc.head.appendChild(meta);
-                    }
-                } catch(e) {
-                    // Cross-origin - ignore
-                }
-            };
-
-            // Handle iframe error
-            iframe.onerror = function() {
-                if (retryCount < maxRetries) {
-                    retryCount++;
-                    console.log(`Retry ${retryCount}/${maxRetries}`);
-                    setTimeout(() => {
-                        iframe.src = '/proxy?retry=' + retryCount;
-                    }, 2000 * retryCount);
-                } else {
-                    showError('Failed to load content. Please refresh.');
-                }
-            };
-
-            // Timeout handler
-            setTimeout(() => {
-                try {
-                    if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
-                        showError('Loading timeout. Please refresh.');
-                    }
-                } catch(e) {
-                    showError('Connection error. Please refresh.');
-                }
-            }, 10000);
-
-            // Handle visibility change
-            document.addEventListener('visibilitychange', function() {
-                if (!document.hidden) {
-                    try {
-                        if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
-                            iframe.src = '/proxy';
-                        }
-                    } catch(e) {}
-                }
-            });
-
-        })();
+        }, 10000);
     </script>
 </body>
 </html>
@@ -253,69 +199,70 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    """Main page"""
     response = make_response(render_template_string(HTML_TEMPLATE))
-    
-    # Headers for Render
     response.headers['X-Frame-Options'] = 'ALLOWALL'
-    response.headers['Content-Security-Policy'] = "frame-ancestors *; default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src *; img-src * data:; style-src * 'unsafe-inline';"
     response.headers['Access-Control-Allow-Origin'] = '*'
-    
+    response.headers['Content-Security-Policy'] = "frame-ancestors *; default-src * 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src *; img-src * data:; style-src * 'unsafe-inline';"
     return response
 
 @app.route('/proxy')
-@app.route('/proxy/<path:path>')
-def proxy(path=''):
-    """Proxy endpoint to load the target website"""
+def proxy():
     try:
         # Target URL
-        target_url = 'https://kimstress.st/login'
-        
-        # Random parameters to bypass cache
-        random_param = f'?r={random.randint(1000, 9999)}&t={datetime.now().timestamp()}'
+        url = 'https://kimstress.st/login'
         
         # Headers to mimic real browser
         headers = {
-            'User-Agent': random.choice([
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ]),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
             'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Referer': 'https://www.google.com/'
+            'Pragma': 'no-cache'
         }
         
         # Make request
         session = requests.Session()
-        response = session.get(target_url + random_param, headers=headers, timeout=15, allow_redirects=True)
+        response = session.get(url, headers=headers, timeout=15, allow_redirects=True)
         
-        # Get content
+        # Get content and handle compression
         content = response.content
         
-        # Replace URLs
-        content = content.replace(b'src="/', b'src="https://kimstress.st/')
-        content = content.replace(b"src='/", b"src='https://kimstress.st/")
-        content = content.replace(b'href="/', b'href="https://kimstress.st/')
-        content = content.replace(b"href='/", b"href='https://kimstress.st/")
-        content = content.replace(b'url("/', b'url("https://kimstress.st/')
-        content = content.replace(b"url('/", b"url('https://kimstress.st/")
-        content = content.replace(b'@import "/', b'@import "https://kimstress.st/')
-        content = content.replace(b"@import '/", b"@import 'https://kimstress.st/")
+        # Check if content is gzipped
+        if response.headers.get('Content-Encoding') == 'gzip':
+            try:
+                content = gzip.decompress(content)
+            except:
+                pass
         
-        # Add base tag
-        if b'<head>' in content.lower():
-            base_tag = b'<base href="https://kimstress.st/">'
-            content = content.replace(b'<head>', b'<head>' + base_tag)
+        # Decode if it's bytes
+        if isinstance(content, bytes):
+            try:
+                # Try to decode as utf-8
+                content = content.decode('utf-8', errors='ignore')
+            except:
+                # If decode fails, keep as bytes
+                pass
+        
+        # Fix relative URLs
+        if isinstance(content, str):
+            content = content.replace('src="/', 'src="https://kimstress.st/')
+            content = content.replace("src='/", "src='https://kimstress.st/")
+            content = content.replace('href="/', 'href="https://kimstress.st/')
+            content = content.replace("href='/", "href='https://kimstress.st/")
+            content = content.replace('url("/', 'url("https://kimstress.st/')
+            content = content.replace("url('/", "url('https://kimstress.st/")
+            content = content.replace('@import "/', '@import "https://kimstress.st/')
+            content = content.replace("@import '/", "@import 'https://kimstress.st/")
+            
+            # Add base tag
+            if '<head>' in content:
+                content = content.replace('<head>', '<head><base href="https://kimstress.st/">')
+            
+            # Convert back to bytes
+            content = content.encode('utf-8')
         
         # Create response
         proxy_response = make_response(content)
@@ -324,10 +271,13 @@ def proxy(path=''):
         for cookie in response.cookies:
             proxy_response.set_cookie(cookie.name, cookie.value, domain=None, path='/')
         
-        # Set headers
-        proxy_response.headers['Content-Type'] = response.headers.get('Content-Type', 'text/html; charset=utf-8')
+        # Set content type
+        proxy_response.headers['Content-Type'] = 'text/html; charset=utf-8'
         proxy_response.headers['Access-Control-Allow-Origin'] = '*'
         proxy_response.headers['X-Frame-Options'] = 'ALLOWALL'
+        
+        # Remove content encoding to prevent double compression
+        proxy_response.headers.pop('Content-Encoding', None)
         
         return proxy_response
         
@@ -340,15 +290,7 @@ def proxy(path=''):
 
 @app.route('/health')
 def health():
-    """Health check endpoint"""
-    return {'status': 'healthy', 'timestamp': datetime.now().isoformat()}
-
-@app.after_request
-def add_headers(response):
-    """Add headers to all responses"""
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = '*'
-    return response
+    return {'status': 'healthy', 'time': str(datetime.now())}
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
