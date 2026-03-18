@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: kimstress-proxy
+    name: kimstress-cloudflare-bypass
     runtime: python
     region: oregon
     plan: free
