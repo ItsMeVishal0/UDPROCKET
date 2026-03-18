@@ -1,402 +1,288 @@
-from flask import Flask, render_template_string, request, jsonify, Response
-from flask_cors import CORS
-import requests
-import logging
 import os
-import time
 import random
+import string
+import requests
+from flask import Flask, render_template_string, make_response
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = 'cloudflare-bypass-key'
-CORS(app)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# User agents pool to avoid detection
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-]
-
-login_database = []
-
-# HTML Template with better iframe handling
-HTML_TEMPLATE = """
+# HTML Template with proxy approach
+HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kimstress Login Portal</title>
+    <title>Secure Gateway</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-
-        .main-content {
-            background: white;
-            border-radius: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
             overflow: hidden;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
         }
-
-        .header {
-            background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-            color: white;
-            padding: 25px 30px;
+        .container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
         }
-
-        .header h1 {
-            font-size: 28px;
-            margin-bottom: 5px;
+        .browser-mock {
+            background: #1a1a1a;
+            padding: 8px 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid #333;
         }
-
-        .warning-banner {
-            background: #fef9c3;
-            color: #854d0e;
-            padding: 12px 20px;
+        .browser-dots { display: flex; gap: 8px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; }
+        .dot.red { background: #ff5f56; }
+        .dot.yellow { background: #ffbd2e; }
+        .dot.green { background: #27c93f; }
+        .browser-address {
+            flex: 1;
+            background: #333;
+            color: #fff;
+            padding: 6px 15px;
+            border-radius: 20px;
             font-size: 14px;
             display: flex;
             align-items: center;
             gap: 10px;
-            border-bottom: 1px solid #e2e8f0;
         }
-
+        .lock-icon { color: #4caf50; font-size: 16px; }
+        .url-text { color: #aaa; margin-left: auto; font-size: 12px; }
         .iframe-container {
+            flex: 1;
+            background: white;
             position: relative;
-            height: 650px;
-            background: #f1f5f9;
+            overflow: hidden;
         }
-
-        iframe {
+        #main-frame {
             width: 100%;
             height: 100%;
             border: none;
+            background: white;
+            display: block;
         }
-
-        .loading-overlay {
+        .loading-screen {
             position: absolute;
             top: 0;
             left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(255, 255, 255, 0.95);
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
-            flex-direction: column;
-            gap: 20px;
-            z-index: 1000;
-            backdrop-filter: blur(5px);
+            color: white;
+            z-index: 10;
+            transition: opacity 0.3s ease;
         }
-
-        .spinner {
-            width: 50px;
-            height: 50px;
-            border: 4px solid #e2e8f0;
-            border-top: 4px solid #2563eb;
+        .loading-screen.hidden { opacity: 0; pointer-events: none; }
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 5px solid rgba(255,255,255,0.3);
+            border-top-color: white;
             border-radius: 50%;
             animation: spin 1s linear infinite;
+            margin-bottom: 20px;
         }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .controls {
-            padding: 20px 30px;
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { font-size: 18px; margin-bottom: 10px; }
+        .loading-subtext { font-size: 14px; opacity: 0.8; }
+        .error-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             background: white;
-            border-top: 1px solid #e2e8f0;
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .btn {
-            padding: 12px 24px;
-            border: none;
+            padding: 30px;
             border-radius: 10px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            transition: all 0.3s;
-        }
-
-        .btn-primary {
-            background: #2563eb;
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: #1d4ed8;
-            transform: translateY(-2px);
-        }
-
-        .btn-success {
-            background: #22c55e;
-            color: white;
-        }
-
-        .btn-warning {
-            background: #f59e0b;
-            color: white;
-        }
-
-        .sidebar {
-            background: white;
-            border-radius: 20px;
-            padding: 25px;
-            margin-top: 20px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-        }
-
-        .stats-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-            gap: 15px;
-            margin: 20px 0;
-        }
-
-        .stat-card {
-            background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 15px;
             text-align: center;
-        }
-
-        .stat-number {
-            font-size: 28px;
-            font-weight: 700;
-            margin-bottom: 5px;
-        }
-
-        .login-item {
-            background: #f8fafc;
-            border-radius: 12px;
-            padding: 15px;
-            margin-bottom: 10px;
-            border-left: 4px solid #2563eb;
-        }
-
-        .notification {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 15px 25px;
-            border-radius: 10px;
-            color: white;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
             display: none;
-            z-index: 9999;
-            animation: slideIn 0.3s;
+            z-index: 20;
         }
-
-        @keyframes slideIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
-
-        .tip-box {
-            background: #dbeafe;
-            border-radius: 12px;
-            padding: 20px;
+        .error-message.show { display: block; }
+        .error-title { color: #ff4757; font-size: 20px; margin-bottom: 10px; }
+        .refresh-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 30px;
+            border-radius: 5px;
             margin-top: 20px;
-            color: #1e40af;
-            font-size: 14px;
+            cursor: pointer;
+            font-weight: 600;
         }
+        .refresh-btn:hover { background: #5a67d8; }
     </style>
 </head>
 <body>
-    <div class="notification" id="notification"></div>
-    
     <div class="container">
-        <div class="main-content">
-            <div class="header">
-                <h1>🔐 Kimstress.st Login Portal</h1>
-                <p>Advanced Cloudflare Bypass • Anti-Detection Mode</p>
+        <div class="browser-mock">
+            <div class="browser-dots">
+                <div class="dot red"></div>
+                <div class="dot yellow"></div>
+                <div class="dot green"></div>
             </div>
-            
-            <div class="warning-banner">
-                <span>⚠️</span>
-                <span>If you see "Verify you are human", click "Open in New Window" button below</span>
-            </div>
-            
-            <div class="iframe-container">
-                <iframe 
-                    id="mainIframe" 
-                    src="/proxy?url=https://kimstress.st/login"
-                    sandbox="allow-forms allow-scripts allow-same-origin allow-popups allow-modals allow-popups-to-escape-sandbox allow-top-navigation"
-                    allow="camera; microphone; fullscreen">
-                </iframe>
-                
-                <div class="loading-overlay" id="loadingOverlay">
-                    <div class="spinner"></div>
-                    <div style="color: #1e293b; font-weight: 500;">Bypassing Cloudflare protection...</div>
-                </div>
-            </div>
-            
-            <div class="controls">
-                <button class="btn btn-primary" onclick="reloadIframe()">
-                    🔄 Reload with New Identity
-                </button>
-                <button class="btn btn-warning" onclick="openInNewWindow()">
-                    🌐 Open in New Window (Recommended)
-                </button>
-                <button class="btn btn-success" onclick="tryMobileMode()">
-                    📱 Try Mobile Mode
-                </button>
+            <div class="browser-address">
+                <span class="lock-icon">🔒</span>
+                <span>kimstress.st/login</span>
+                <span class="url-text">secure connection</span>
             </div>
         </div>
         
-        <div class="sidebar">
-            <h3 style="margin-bottom: 15px;">📊 Bypass Status</h3>
-            
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-number" id="attemptCount">0</div>
-                    <div>Attempts</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="successCount">0</div>
-                    <div>Success</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="failCount">0</div>
-                    <div>Failed</div>
-                </div>
+        <div class="iframe-container">
+            <div class="loading-screen" id="loadingScreen">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">Loading secure content...</div>
+                <div class="loading-subtext">Please wait while we establish connection</div>
             </div>
             
-            <div class="tip-box">
-                <strong>💡 Quick Tip:</strong><br>
-                Cloudflare blocks iframes. Click "Open in New Window" to access directly, then copy login data manually.
+            <div class="error-message" id="errorMessage">
+                <div class="error-title">⚠️ Connection Error</div>
+                <div id="errorText">Failed to load content</div>
+                <button class="refresh-btn" onclick="location.reload()">Try Again</button>
             </div>
+            
+            <iframe 
+                id="main-frame"
+                src="/proxy"
+                sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals allow-top-navigation allow-downloads allow-popups-to-escape-sandbox allow-storage-access-by-user-activation"
+                referrerpolicy="no-referrer"
+                importance="high"
+                loading="eager">
+            </iframe>
         </div>
     </div>
 
     <script>
-        let attempts = 0;
-        let successes = 0;
-        let failures = 0;
-        
-        function reloadIframe() {
-            attempts++;
-            document.getElementById('attemptCount').textContent = attempts;
+        (function() {
+            // Anti-detection
+            Object.defineProperties(navigator, {
+                webdriver: { get: () => undefined },
+                plugins: { get: () => [1, 2, 3, 4, 5] },
+                languages: { get: () => ['en-US', 'en', 'hi'] }
+            });
             
-            document.getElementById('loadingOverlay').style.display = 'flex';
-            
-            // Add random parameter to avoid cache
-            const randomId = Math.random().toString(36).substring(7);
-            document.getElementById('mainIframe').src = '/proxy?url=https://kimstress.st/login&t=' + Date.now() + '&id=' + randomId;
-            
-            // Auto hide after 10 seconds
-            setTimeout(() => {
-                document.getElementById('loadingOverlay').style.display = 'none';
-            }, 10000);
-        }
-        
-        function openInNewWindow() {
-            successes++;
-            document.getElementById('successCount').textContent = successes;
-            
-            // Open in new window with JavaScript disabled? No, just normal window
-            window.open('https://kimstress.st/login', '_blank');
-            showNotification('✅ Opened in new window. Login there and copy data.', 'success');
-        }
-        
-        function tryMobileMode() {
-            // Try mobile user agent
-            fetch('/mobile-mode')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success) {
-                        reloadIframe();
-                        showNotification('📱 Switched to mobile mode', 'success');
-                    }
-                });
-        }
-        
-        function showNotification(msg, type) {
-            const notif = document.getElementById('notification');
-            notif.style.display = 'block';
-            notif.textContent = msg;
-            notif.style.background = type === 'success' ? '#22c55e' : '#ef4444';
-            setTimeout(() => notif.style.display = 'none', 3000);
-        }
-        
-        // Handle iframe load
-        document.getElementById('mainIframe').onload = function() {
-            document.getElementById('loadingOverlay').style.display = 'none';
-            
-            try {
-                // Check if iframe content shows Cloudflare
-                const iframeDoc = this.contentDocument || this.contentWindow.document;
-                const bodyText = iframeDoc.body?.innerText || '';
-                
-                if (bodyText.includes('Verify you are human') || bodyText.includes('security check')) {
-                    failures++;
-                    document.getElementById('failCount').textContent = failures;
-                    showNotification('❌ Cloudflare detected - Use "Open in New Window"', 'error');
-                } else {
-                    successes++;
-                    document.getElementById('successCount').textContent = successes;
-                }
-            } catch(e) {
-                // CORS error - but that's okay, means iframe loaded
-                successes++;
-                document.getElementById('successCount').textContent = successes;
+            if (!window.chrome) {
+                window.chrome = { runtime: {} };
             }
-        };
-        
-        // Initial load
-        setTimeout(() => {
-            showNotification('⚠️ If blocked, click "Open in New Window"', 'warning');
-        }, 2000);
+
+            const iframe = document.getElementById('main-frame');
+            const loadingScreen = document.getElementById('loadingScreen');
+            const errorMessage = document.getElementById('errorMessage');
+            
+            let retryCount = 0;
+            const maxRetries = 3;
+
+            function showError(msg) {
+                document.getElementById('errorText').textContent = msg;
+                errorMessage.classList.add('show');
+                loadingScreen.classList.add('hidden');
+            }
+
+            // Handle iframe load
+            iframe.onload = function() {
+                console.log('Iframe loaded successfully');
+                loadingScreen.classList.add('hidden');
+                errorMessage.classList.remove('show');
+                
+                // Try to modify iframe content
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    if (iframeDoc) {
+                        // Add meta tags for better rendering
+                        const meta = iframeDoc.createElement('meta');
+                        meta.name = 'viewport';
+                        meta.content = 'width=device-width, initial-scale=1.0';
+                        iframeDoc.head.appendChild(meta);
+                    }
+                } catch(e) {
+                    // Cross-origin - ignore
+                }
+            };
+
+            // Handle iframe error
+            iframe.onerror = function() {
+                if (retryCount < maxRetries) {
+                    retryCount++;
+                    console.log(`Retry ${retryCount}/${maxRetries}`);
+                    setTimeout(() => {
+                        iframe.src = '/proxy?retry=' + retryCount;
+                    }, 2000 * retryCount);
+                } else {
+                    showError('Failed to load content. Please refresh.');
+                }
+            };
+
+            // Timeout handler
+            setTimeout(() => {
+                try {
+                    if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
+                        showError('Loading timeout. Please refresh.');
+                    }
+                } catch(e) {
+                    showError('Connection error. Please refresh.');
+                }
+            }, 10000);
+
+            // Handle visibility change
+            document.addEventListener('visibilitychange', function() {
+                if (!document.hidden) {
+                    try {
+                        if (iframe.contentWindow && iframe.contentWindow.location.href === 'about:blank') {
+                            iframe.src = '/proxy';
+                        }
+                    } catch(e) {}
+                }
+            });
+
+        })();
     </script>
 </body>
 </html>
-"""
+'''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    """Main page"""
+    response = make_response(render_template_string(HTML_TEMPLATE))
+    
+    # Headers for Render
+    response.headers['X-Frame-Options'] = 'ALLOWALL'
+    response.headers['Content-Security-Policy'] = "frame-ancestors *; default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; script-src * 'unsafe-inline' 'unsafe-eval'; connect-src *; img-src * data:; style-src * 'unsafe-inline';"
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    
+    return response
 
 @app.route('/proxy')
-def proxy():
-    """Proxy with advanced headers to bypass Cloudflare"""
-    target_url = request.args.get('url', 'https://kimstress.st/login')
-    
+@app.route('/proxy/<path:path>')
+def proxy(path=''):
+    """Proxy endpoint to load the target website"""
     try:
-        # Random user agent
-        user_agent = random.choice(USER_AGENTS)
+        # Target URL
+        target_url = 'https://kimstress.st/login'
         
-        # Advanced headers to mimic real browser
+        # Random parameters to bypass cache
+        random_param = f'?r={random.randint(1000, 9999)}&t={datetime.now().timestamp()}'
+        
+        # Headers to mimic real browser
         headers = {
-            'User-Agent': user_agent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': random.choice([
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
@@ -404,85 +290,66 @@ def proxy():
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Referer': 'https://www.google.com/',
-            'DNT': '1'
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Referer': 'https://www.google.com/'
         }
         
-        # Use session to maintain cookies
+        # Make request
         session = requests.Session()
+        response = session.get(target_url + random_param, headers=headers, timeout=15, allow_redirects=True)
         
-        # First request to get cookies
-        response = session.get(
-            target_url,
-            headers=headers,
-            timeout=15,
-            allow_redirects=True,
-            verify=False
-        )
+        # Get content
+        content = response.content
+        
+        # Replace URLs
+        content = content.replace(b'src="/', b'src="https://kimstress.st/')
+        content = content.replace(b"src='/", b"src='https://kimstress.st/")
+        content = content.replace(b'href="/', b'href="https://kimstress.st/')
+        content = content.replace(b"href='/", b"href='https://kimstress.st/")
+        content = content.replace(b'url("/', b'url("https://kimstress.st/')
+        content = content.replace(b"url('/", b"url('https://kimstress.st/")
+        content = content.replace(b'@import "/', b'@import "https://kimstress.st/')
+        content = content.replace(b"@import '/", b"@import 'https://kimstress.st/")
+        
+        # Add base tag
+        if b'<head>' in content.lower():
+            base_tag = b'<base href="https://kimstress.st/">'
+            content = content.replace(b'<head>', b'<head>' + base_tag)
         
         # Create response
-        proxy_response = Response(
-            response.content,
-            status=response.status_code,
-            content_type=response.headers.get('Content-Type', 'text/html')
-        )
+        proxy_response = make_response(content)
         
-        # Allow iframe embedding
+        # Copy cookies
+        for cookie in response.cookies:
+            proxy_response.set_cookie(cookie.name, cookie.value, domain=None, path='/')
+        
+        # Set headers
+        proxy_response.headers['Content-Type'] = response.headers.get('Content-Type', 'text/html; charset=utf-8')
         proxy_response.headers['Access-Control-Allow-Origin'] = '*'
         proxy_response.headers['X-Frame-Options'] = 'ALLOWALL'
         
-        # Copy cookies
-        for cookie in session.cookies:
-            proxy_response.set_cookie(cookie.name, cookie.value)
-        
         return proxy_response
         
+    except requests.exceptions.Timeout:
+        return "Connection timeout. Please refresh.", 504
+    except requests.exceptions.ConnectionError:
+        return "Connection error. Please check your internet.", 502
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return f"""
-        <html>
-        <body style="font-family: Arial; text-align: center; padding: 40px;">
-            <h2>⚠️ Connection Error</h2>
-            <p>{str(e)}</p>
-            <button onclick="window.parent.openInNewWindow()" style="padding: 12px 30px; background: #2563eb; color: white; border: none; border-radius: 8px; margin-top: 20px;">
-                Open in New Window
-            </button>
-        </body>
-        </html>
-        """
-
-@app.route('/mobile-mode')
-def mobile_mode():
-    """Switch to mobile user agent"""
-    try:
-        # Mobile user agent
-        mobile_ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
-        
-        response = requests.get(
-            'https://kimstress.st/login',
-            headers={'User-Agent': mobile_ua},
-            timeout=5
-        )
-        
-        return jsonify({"success": True})
-    except:
-        return jsonify({"success": False})
+        return f"Error: {str(e)}", 500
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy"})
+    """Health check endpoint"""
+    return {'status': 'healthy', 'timestamp': datetime.now().isoformat()}
+
+@app.after_request
+def add_headers(response):
+    """Add headers to all responses"""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = '*'
+    return response
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print("="*60)
-    print("🚀 Kimstress Portal - Cloudflare Bypass Mode")
-    print("="*60)
-    print("⚠️  If iframe shows Cloudflare, use 'Open in New Window'")
-    print(f"🔗 URL: http://localhost:{port}")
-    print("="*60)
-    
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
